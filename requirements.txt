@@ -1,0 +1,4 @@
+requests
+google-cloud-dataplex
+google-cloud-bigquery
+google-cloud-storage

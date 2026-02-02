@@ -1,0 +1,24 @@
+{
+  "relationships": [
+    {
+      "source_table": "customers",
+      "target_table": "customers_curated",
+      "column_mappings": [
+        {
+          "source_col": "cust_id",
+          "target_col": "customer_id",
+          "confidence": 0.99,
+          "type": "RENAME",
+          "explanation": "High confidence semantic match via Knowledge Engine"
+        },
+        {
+          "source_col": "email",
+          "target_col": "email_address",
+          "confidence": 0.95,
+          "type": "RENAME",
+          "explanation": "Standard rename pattern"
+        }
+      ]
+    }
+  ]
+}
