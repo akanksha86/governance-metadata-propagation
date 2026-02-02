@@ -1,2 +1,90 @@
-# governance-metadata-propagation
-This demo shows possibilities of metadata propagation using several options like Lineage, Insights, Data Insights and Metadata Export / Dataplex APIs
+# Governance Metadata Propagation Demo
+
+This project demonstrates an agentic data governance solution using Google Cloud Dataplex. It showcases how to automate metadata management, propagate insights via lineage, and leverage Dataplex "Knowledge Engine" capabilities.
+
+## Overview
+
+The solution focuses on:
+1.  **Synthetic Data Generation**: Creating complex retail data with built-in lineage relationships (e.g., `raw_transactions` -> `transactions`).
+2.  **Dataset Insights (Knowledge Engine)**: Automating **Dataset-level** Data Documentation scans to verify and document entire datasets.
+3.  **Table Insights**: Automating **Table-level** Data Documentation scans to generate column-level descriptions and insights.
+4.  **Auto-Publishing**: Automatically publishing scan results (e.g., generated descriptions, golden queries) to BigQuery metadata using Dataplex labels (`dataplex-data-documentation-published-*`).
+5.  **Lineage Propagation**: Propagating metadata (descriptions, tags) from upstream to downstream tables based on lineage analysis.
+
+## Prerequisites
+
+*   Google Cloud Project with billing enabled.
+*   APIs Enabled:
+    *   Dataplex API (`dataplex.googleapis.com`)
+    *   BigQuery API (`bigquery.googleapis.com`)
+    *   Data Catalog API (`datacatalog.googleapis.com`)
+    *   Data Lineage API (`datalineage.googleapis.com`)
+*   Python 3.8+
+
+## Setup
+
+1.  Clone the repository and navigate to the project root.
+2.  Set your Google Cloud Project ID:
+    ```bash
+    export GOOGLE_CLOUD_PROJECT=your-project-id
+    ```
+3.  Create and activate a virtual environment:
+    ```bash
+    python3 -m venv venv
+    source venv/bin/activate
+    ```
+4.  Install dependencies:
+    ```bash
+    pip install -r dataplex_integration/requirements.txt
+    ```
+
+## Key Components
+
+### 1. Data Generation
+**Script**: `data_generation/generate_data.py`
+
+Generates synthetic retail data (Customers, Products, Orders, Transactions) and loads it into BigQuery. It also performs SQL transformations (`CTAS`) to establish lineage between "raw" and "derived" tables.
+
+**Usage**:
+```bash
+python3 data_generation/generate_data.py
+```
+
+### 2. Dataset Insights (Knowledge Engine)
+**Script**: `dataplex_integration/knowledge_engine.py`
+
+Implements **Dataset-level** Data Documentation scans (often referred to as "Knowledge Engine").
+*   Creates a single scan for the entire `retail_syn_data` dataset.
+*   **Crucial Feature**: Automatically applies the required `dataplex-data-documentation-published-*` labels to the **BigQuery Dataset**.
+*   This ensures that dataset-level insights (e.g., entity relationship diagrams, common join patterns) are published back to BigQuery.
+
+**Usage**:
+```bash
+python3 dataplex_integration/knowledge_engine.py
+```
+
+### 3. Table Insights
+**Script**: `dataplex_integration/manage_insights.py`
+
+Implements **Table-level** Data Documentation scans.
+*   Iterates through key tables (`raw_customers`, `raw_transactions`, etc.).
+*   Creates Data Documentation scans for each table.
+*   **Crucial Feature**: Automatically applies the required `dataplex-data-documentation-published-*` labels to each **BigQuery Table**.
+*   This ensures column-level descriptions and other table-specific insights are published to BigQuery metadata.
+
+**Usage**:
+```bash
+python3 dataplex_integration/manage_insights.py
+```
+
+### 4. Lineage Propagation
+**Script**: `dataplex_integration/lineage_propagation.py`
+
+(Optional) Demonstrates how to programmatically traverse Data Lineage to propagate tags or descriptions from upstream sources to downstream targets.
+
+## Workflow Example
+
+1.  **Generate Data**: `python3 data_generation/generate_data.py` (Creates tables + lineage).
+2.  **Run Dataset Insights**: `python3 dataplex_integration/knowledge_engine.py` (Scans dataset).
+3.  **Run Table Insights**: `python3 dataplex_integration/manage_insights.py` (Scans tables).
+4.  **Verify**: Check BigQuery Console. You should see descriptions populated on your tables and columns, and "Insights" tabs available in Dataplex/BigQuery.
