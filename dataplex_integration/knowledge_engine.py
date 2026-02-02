@@ -1,13 +1,38 @@
 import os
 import time
+import json
 from google.cloud import dataplex_v1
 from google.cloud import bigquery
 from google.api_core.exceptions import NotFound
+from google.protobuf.json_format import MessageToDict
 
 # Configuration
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
 LOCATION = "europe-west1"
 DATASET_ID = "retail_syn_data"
+
+class DescriptionPropagator:
+    """Helper class to load and serve Knowledge Engine insights."""
+    def __init__(self, json_path=None):
+        self.json_path = json_path
+        self.knowledge_json = {}
+        if json_path:
+            self._load_insights()
+
+    def _load_insights(self):
+        try:
+            with open(self.json_path, 'r') as f:
+                self.knowledge_json = json.load(f)
+                # Normalize structure if needed, or propagate_metadata will handle it.
+                # propagate_metadata expects 'relationships' key based on my previous code,
+                # BUT lineage_propagation expects 'datasetResult' -> 'schemaRelationships'.
+                # I should align them.
+                
+                # If using the 'API Structure' (datasetResult), let's map it to what propagate_metadata might want 
+                # OR update propagate_metadata to use the raw API structure too.
+                # For now, I'll just expose the raw json.
+        except Exception as e:
+            print(f"Failed to load insights from {self.json_path}: {e}")
 
 def update_bq_dataset_labels(dataset_id, scan_id):
     """Updates BigQuery dataset labels to enable Dataplex Insights publishing."""
@@ -81,19 +106,49 @@ def create_and_start_dataset_scan():
         print(f"[{DATASET_ID}] Failed to start scan: {e}")
         return None
 
+def extract_and_save_insights(job, output_file="knowledge_insights.json"):
+    """Extracts Data Documentation results (insights) and saves to JSON."""
+    try:
+        # Convert Protobuf to Dict
+        job_dict = MessageToDict(job._pb)
+        
+        # Navigate to dataDocumentationResult
+        result = job_dict.get("dataDocumentationResult", {})
+        
+        if result:
+            with open(output_file, 'w') as f:
+                json.dump(result, f, indent=2)
+            print(f"[{DATASET_ID}] Insights saved to {output_file}")
+            
+            # Print summary of relationships found
+            relationships = result.get("datasetResult", {}).get("schemaRelationships", [])
+            print(f"[{DATASET_ID}] Found {len(relationships)} schema relationships.")
+        else:
+            print(f"[{DATASET_ID}] No Data Documentation results found in job.")
+            print(f"DEBUG: Job Dict Keys: {job_dict.keys()}")
+            
+    except Exception as e:
+        print(f"[{DATASET_ID}] Failed to save insights: {e}")
+
 def wait_for_job(job_name):
-    """Waits for the job to complete."""
+    """Waits for the job to complete and returns the full job object."""
     if not job_name:
-        return
+        return None
         
     client = dataplex_v1.DataScanServiceClient()
     print(f"Waiting for scan job {job_name} to complete...")
     
     while True:
-        job = client.get_data_scan_job(name=job_name)
+        # Request FULL view to get results
+        request = dataplex_v1.GetDataScanJobRequest(
+            name=job_name,
+            view=dataplex_v1.GetDataScanJobRequest.DataScanJobView.FULL
+        )
+        job = client.get_data_scan_job(request=request)
+        
         if job.state in [dataplex_v1.DataScanJob.State.SUCCEEDED, dataplex_v1.DataScanJob.State.FAILED, dataplex_v1.DataScanJob.State.CANCELLED]:
             print(f"[{DATASET_ID}] Scan finished with state: {job.state.name}")
-            break
+            return job
         time.sleep(10)
 
 if __name__ == "__main__":
@@ -102,5 +157,9 @@ if __name__ == "__main__":
         exit(1)
         
     job_name = create_and_start_dataset_scan()
-    wait_for_job(job_name)
+    job = wait_for_job(job_name)
+    
+    # if job and job.state == dataplex_v1.DataScanJob.State.SUCCEEDED:
+    #     extract_and_save_insights(job)
+        
     print("Done.")

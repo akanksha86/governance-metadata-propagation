@@ -9,7 +9,7 @@ The solution focuses on:
 2.  **Dataset Insights (Knowledge Engine)**: Automating **Dataset-level** Data Documentation scans to verify and document entire datasets.
 3.  **Table Insights**: Automating **Table-level** Data Documentation scans to generate column-level descriptions and insights.
 4.  **Auto-Publishing**: Automatically publishing scan results (e.g., generated descriptions, golden queries) to BigQuery metadata using Dataplex labels (`dataplex-data-documentation-published-*`).
-5.  **Lineage Propagation**: Propagating metadata (descriptions, tags) from upstream to downstream tables based on lineage analysis.
+5.  **Lineage Enrichment**: Propagating metadata (descriptions, tags) from upstream to downstream tables based on lineage analysis, enriched with Knowledge Engine insights.
 
 ## Prerequisites
 
@@ -69,7 +69,7 @@ python3 dataplex_integration/knowledge_engine.py
 Implements **Table-level** Data Documentation scans.
 *   Iterates through key tables (`raw_customers`, `raw_transactions`, etc.).
 *   Creates Data Documentation scans for each table.
-*   **Crucial Feature**: Automatically applies the required `dataplex-data-documentation-published-*` labels to each **BigQuery Table**.
+*   **Crucial Feature**: Automatically applies the required `dataplex-data-documentation-published-*` labels to the **BigQuery Table**.
 *   This ensures column-level descriptions and other table-specific insights are published to BigQuery metadata.
 
 **Usage**:
@@ -77,14 +77,31 @@ Implements **Table-level** Data Documentation scans.
 python3 dataplex_integration/manage_insights.py
 ```
 
-### 4. Lineage Propagation
-**Script**: `dataplex_integration/lineage_propagation.py`
+### 4. Lineage Propagation & Enrichment
+**Script**: `dataplex_integration/propagate_metadata.py`
 
-(Optional) Demonstrates how to programmatically traverse Data Lineage to propagate tags or descriptions from upstream sources to downstream targets.
+Propagates metadata (descriptions) from upstream sources to downstream targets.
+*   **Core Feature**: Uses Dataplex **Data Lineage API** to find dependencies.
+*   **Enrichment**: Can consume **Knowledge Engine** insights (Schema Relationships) to bridge lineage gaps (e.g., inferred joins not yet captured by lineage).
+*   **Modes**:
+    *   `report`: Logs what would be propagated (dry-run).
+    *   `apply`: Actually updates BigQuery column descriptions.
+
+**Usage (Enriched Propagation)**:
+```bash
+python3 dataplex_integration/propagate_metadata.py \
+  --project_id $GOOGLE_CLOUD_PROJECT \
+  --dataset_id retail_syn_data \
+  --target_table transactions \
+  --knowledge_json dataplex_integration/knowledge_engine_sample.json \
+  --mode report
+```
+*Note: We currently use `knowledge_engine_sample.json` to simulate insights while live extraction is being configured.*
 
 ## Workflow Example
 
 1.  **Generate Data**: `python3 data_generation/generate_data.py` (Creates tables + lineage).
 2.  **Run Dataset Insights**: `python3 dataplex_integration/knowledge_engine.py` (Scans dataset).
 3.  **Run Table Insights**: `python3 dataplex_integration/manage_insights.py` (Scans tables).
-4.  **Verify**: Check BigQuery Console. You should see descriptions populated on your tables and columns, and "Insights" tabs available in Dataplex/BigQuery.
+4.  **Run Propagation**: Use `propagate_metadata.py` to enrich and apply metadata.
+5.  **Verify**: Check BigQuery Console. You should see descriptions populated on your tables and columns, and "Insights" tabs available in Dataplex/BigQuery.

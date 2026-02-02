@@ -237,7 +237,13 @@ def main():
         return
 
     # Initialize components
-    lineage_traverser = LineageGraphTraverser(args.project_id, "europe-west1") 
+    lineage_traverser = LineageGraphTraverser(args.project_id, "europe-west1")
+    
+    # Load knowledge insights if provided (Enriching the Lineage Graph)
+    if args.knowledge_json:
+        logger.info(f"Loading Knowledge Engine insights from {args.knowledge_json}")
+        lineage_traverser.load_knowledge_insights(args.knowledge_json)
+        
     description_propagator = DescriptionPropagator(args.knowledge_json)
     
     # 1. Chain Mode (Upstream -> Entity -> Downstream)
