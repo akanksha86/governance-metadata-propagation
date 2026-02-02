@@ -1,98 +1,125 @@
 import os
 import time
+import concurrent.futures
 from google.cloud import dataplex_v1
 from google.cloud import bigquery
-from google.protobuf import struct_pb2
+from google.api_core.exceptions import NotFound
 
 # Configuration
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
 LOCATION = "europe-west1"
 DATASET_ID = "retail_syn_data"
 
-def create_and_run_scan(table_name, scan_type):
-    """Creates and runs a Dataplex Data Scan (PROFILE or DATA_DOCUMENTATION)."""
+def update_bq_labels(table_name, scan_id):
+    """Updates BigQuery table labels to enable Dataplex Insights publishing."""
+    client = bigquery.Client(project=PROJECT_ID)
+    table_ref = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
+    
+    try:
+        table = client.get_table(table_ref)
+        labels = table.labels or {}
+        
+        # Labels required for publishing scan results to BigQuery
+        updates = {
+            "dataplex-data-documentation-published-scan": scan_id,
+            "dataplex-data-documentation-published-project": PROJECT_ID,
+            "dataplex-data-documentation-published-location": LOCATION
+        }
+        
+        # Only update if changes are needed
+        needs_update = False
+        for k, v in updates.items():
+            if labels.get(k) != v:
+                labels[k] = v
+                needs_update = True
+                
+        if needs_update:
+            table.labels = labels
+            client.update_table(table, ["labels"])
+            print(f"[{table_name}] Updated labels for BigQuery publishing.")
+        else:
+            print(f"[{table_name}] Labels already configured for publishing.")
+            
+    except Exception as e:
+        print(f"[{table_name}] Failed to update BQ labels: {e}")
+
+def create_and_start_scan(table_name):
+    """Creates (if needed) and starts a Data Documentation scan."""
     client = dataplex_v1.DataScanServiceClient()
     parent = f"projects/{PROJECT_ID}/locations/{LOCATION}"
-    scan_id = f"{scan_type.lower().replace('_', '-')}-{table_name}"
+    scan_id = f"doc-scan-{table_name.replace('_', '-')}"
+    scan_name = f"{parent}/dataScans/{scan_id}"
     
-    # Check if scan already exists
+    # 1. Create Scan if missing
     try:
-        existing_scan = client.get_data_scan(name=f"{parent}/dataScans/{scan_id}")
-        print(f"Scan {scan_id} already exists.")
-        scan_name = existing_scan.name
-    except Exception:
-        # Create new scan
+        client.get_data_scan(name=scan_name)
+    except NotFound:
+        print(f"[{table_name}] Creating Data Documentation scan...")
         data_scan = dataplex_v1.DataScan()
         data_scan.data.resource = f"//bigquery.googleapis.com/projects/{PROJECT_ID}/datasets/{DATASET_ID}/tables/{table_name}"
         data_scan.execution_spec.trigger.on_demand = {}
-        data_scan.type_ = scan_type
+        data_scan.type_ = dataplex_v1.DataScanType.DATA_DOCUMENTATION
+        data_scan.data_documentation_spec = {}
         
-        if scan_type == "DATA_DOCUMENTATION":
-            data_scan.data_documentation_spec = {}
+        operation = client.create_data_scan(
+            parent=parent,
+            data_scan=data_scan,
+            data_scan_id=scan_id
+        )
+        operation.result()
+    
+    # 2. Configure BigQuery Labels for Publishing
+    # This must be done so Dataplex knows where to push the results
+    update_bq_labels(table_name, scan_id)
+
+    # 3. Run Scan
+    print(f"[{table_name}] Starting scan...")
+    try:
+        run_response = client.run_data_scan(name=scan_name)
+        return table_name, run_response.job.name
+    except Exception as e:
+        print(f"[{table_name}] Failed to start scan: {e}")
+        return table_name, None
+
+def wait_for_jobs(jobs_map):
+    """Waits for all jobs to complete."""
+    client = dataplex_v1.DataScanServiceClient()
+    pending = list(jobs_map.keys())
+    
+    while pending:
+        print(f"Waiting for {len(pending)} scans to complete...")
+        time.sleep(10)
         
-        try:
-            operation = client.create_data_scan(
-                parent=parent,
-                data_scan=data_scan,
-                data_scan_id=scan_id
-            )
-            print(f"Creating {scan_type} scan for {table_name}...")
-            result = operation.result()
-            scan_name = result.name
-            print(f"{scan_type} scan created: {scan_name}")
-        except Exception as e:
-            print(f"Failed to create {scan_type} scan for {table_name}: {e}")
-            return None
-
-    # Run the scan
-    try:
-        run_operation = client.run_data_scan(name=scan_name)
-        job_id = run_operation.job.id if hasattr(run_operation, 'job') else 'unknown'
-        print(f"Started {scan_type} scan for {table_name}. Job ID: {job_id}")
-        return scan_id
-    except Exception as e:
-        print(f"Failed to run {scan_type} scan for {table_name}: {e}")
-        return scan_id # Return scan_id anyway as it exists
-
-def publish_scan_results(table_name, scan_id, scan_type):
-    """Publishes scan results to BigQuery table by adding labels."""
-    bq_client = bigquery.Client(project=PROJECT_ID)
-    table_ref = bq_client.dataset(DATASET_ID).table(table_name)
-    table = bq_client.get_table(table_ref)
-    
-    if scan_type == "DATA_PROFILE":
-        prefix = "dataplex-dp-published"
-    elif scan_type == "DATA_DOCUMENTATION":
-        prefix = "dataplex-data-documentation-published"
-    else:
-        print(f"Unknown scan type for publishing: {scan_type}")
-        return
-
-    labels = table.labels or {}
-    labels[f"{prefix}-scan"] = scan_id
-    labels[f"{prefix}-project"] = PROJECT_ID
-    labels[f"{prefix}-location"] = LOCATION
-    
-    table.labels = labels
-    try:
-        bq_client.update_table(table, ["labels"])
-        print(f"Published {scan_type} results to {table_name} via labels.")
-    except Exception as e:
-        print(f"Failed to publish {scan_type} results to {table_name}: {e}")
+        still_pending = []
+        for table_name in pending:
+            job_name = jobs_map[table_name]
+            if not job_name:
+                continue
+                
+            job = client.get_data_scan_job(name=job_name)
+            if job.state in [dataplex_v1.DataScanJob.State.SUCCEEDED, dataplex_v1.DataScanJob.State.FAILED, dataplex_v1.DataScanJob.State.CANCELLED]:
+                print(f"[{table_name}] Scan finished with state: {job.state.name}")
+            else:
+                still_pending.append(table_name)
+        pending = still_pending
 
 if __name__ == "__main__":
     if not PROJECT_ID:
         print("Please set GOOGLE_CLOUD_PROJECT environment variable.")
         exit(1)
-    
-    tables = ["customers", "products"]
-    
-    for table in tables:
-        print(f"\nProcessing table: {table}")
         
-        # 1. Create and Run Data Documentation Scan (For Insights)
-        doc_scan_id = create_and_run_scan(table, "DATA_DOCUMENTATION")
-        if doc_scan_id:
-            publish_scan_results(table, doc_scan_id, "DATA_DOCUMENTATION")
+    tables = ["raw_customers", "raw_products", "raw_orders", "raw_transactions"]
+    
+    # 1. Trigger Scans in Parallel
+    jobs_map = {}
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = {executor.submit(create_and_start_scan, table): table for table in tables}
+        for future in concurrent.futures.as_completed(futures):
+            table, job_name = future.result()
+            if job_name:
+                jobs_map[table] = job_name
+    
+    # 2. Wait for completion
+    wait_for_jobs(jobs_map)
         
-        print(f"Finished processing {table}. Scans are running in background.")
+    print("Done.")

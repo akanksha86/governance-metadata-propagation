@@ -88,8 +88,11 @@ def generate_orders(customers_df, products_df, n=5000):
         
         for _ in range(num_items):
             product = products_df.sample(1).iloc[0]
-            quantity = random.randint(1, 3)
-            amount = product['price'] * quantity if pd.notnull(product['price']) else 0
+            quantity = random.randint(1, 10) # Varied quantity
+            
+            # Ensure price is not None/Zero for better data
+            price = product['price'] if pd.notnull(product['price']) else round(random.uniform(5.0, 100.0), 2)
+            amount = price * quantity
             total_amount += amount
             
             transactions_data.append({
@@ -117,12 +120,17 @@ def load_to_bigquery(df, table_name):
     job.result()
     print(f"Loaded {len(df)} rows to {table_id}")
 
-def create_derived_table(source_table, target_table):
+def create_derived_table(source_table, target_table, custom_query=None):
     """Creates a table using CTAS to establish lineage."""
-    query = f"""
-    CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{target_table}` AS
-    SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.{source_table}`
-    """
+    if custom_query:
+        query = custom_query
+    else:
+        query = f"""
+        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{target_table}` AS
+        SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.{source_table}`
+        """
+    
+    # Execute
     job = client.query(query)
     job.result()
     print(f"Created {target_table} from {source_table} (Lineage established)")
@@ -151,6 +159,22 @@ if __name__ == "__main__":
     create_derived_table("raw_customers", "customers")
     create_derived_table("raw_products", "products")
     create_derived_table("raw_orders", "orders")
-    create_derived_table("raw_transactions", "transactions")
+    
+    # Create transactions with derived fields to test lineage on transformations
+    transactions_query = f"""
+    CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.transactions` AS
+    SELECT 
+        t.*,
+        p.category as product_category,
+        o.order_date as transaction_date,
+        t.amount * 0.9 as amount_discounted,
+        t.amount * 1.1 as amount_taxed,
+        CASE WHEN t.amount > 100 THEN 'HIGH_VALUE' ELSE 'STANDARD' END as transaction_category
+    FROM `{PROJECT_ID}.{DATASET_ID}.raw_transactions` t
+    LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.raw_products` p ON t.product_id = p.product_id
+    LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.raw_orders` o ON t.order_id = o.order_id
+    """
+    create_derived_table("raw_transactions", "transactions", custom_query=transactions_query)
+
     
     print("Done.")
