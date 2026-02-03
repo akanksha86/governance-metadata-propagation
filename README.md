@@ -6,10 +6,9 @@ This project demonstrates an agentic data governance solution using Google Cloud
 
 The solution focuses on:
 1.  **Synthetic Data Generation**: Creating complex retail data with built-in lineage relationships (e.g., `raw_transactions` -> `transactions`).
-2.  **Dataset Insights (Knowledge Engine)**: Automating **Dataset-level** Data Documentation scans to verify and document entire datasets.
-3.  **Table Insights**: Automating **Table-level** Data Documentation scans to generate column-level descriptions and insights.
-4.  **Auto-Publishing**: Automatically publishing scan results (e.g., generated descriptions, golden queries) to BigQuery metadata using Dataplex labels (`dataplex-data-documentation-published-*`).
-5.  **Lineage Enrichment**: Propagating metadata (descriptions, tags) from upstream to downstream tables based on lineage analysis, enriched with Knowledge Engine insights.
+2.  **Dataset & Table Insights**: Automating Data Documentation scans to generate column-level descriptions and dataset-level entity relationships.
+3.  **Agentic Data Steward**: A Gradio-based application for data stewards to scan, analyze, and propagate metadata globally.
+4.  **Enriched Lineage Propagation**: Combining official Data Lineage API with LLM-inferred schema relationships to automate metadata lifecycle.
 
 ## Prerequisites
 
@@ -36,7 +35,23 @@ The solution focuses on:
 4.  Install dependencies:
     ```bash
     pip install -r dataplex_integration/requirements.txt
+    pip install gradio pandas requests google-cloud-datacatalog-lineage
     ```
+
+## 🚀 The Agentic Data Steward App
+
+The core of this project is now a Gradio-based application that provides a unified interface for data governance.
+
+### How to Run
+```bash
+python3 ui/gradio_app.py
+```
+
+### Key Features
+*   **Estate Dashboard**: Scan your BigQuery datasets to identify columns missing descriptions.
+*   **Lineage Insights**: Analyze any table to see a holistic summary of its **Upstream sources** and **Downstream targets**.
+*   **Metadata Propagation**: Automatically fetch descriptions from upstream, enrich them with transformation logic, and apply them back to BigQuery with one click.
+*   **OAuth Support**: Optional "Global Environment Settings" allow you to provide an OAuth token for user-specific actions. See [OAUTH_SETUP_GUIDE.md](OAUTH_SETUP_GUIDE.md) for more info.
 
 ## Key Components
 
