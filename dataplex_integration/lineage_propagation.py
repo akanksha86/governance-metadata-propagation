@@ -10,6 +10,63 @@ from google.api_core import exceptions
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class TransformationEnricher:
+    @staticmethod
+    def enrich_description(target_col, source_col, source_desc):
+        """
+        Enriches the description based on transformation patterns.
+        """
+        explanation = ""
+        
+        # Pattern matching for common fields
+        target_lower = target_col.lower()
+        source_lower = source_col.lower()
+        
+        if any(kw in target_lower for kw in ['amount', 'price', 'cost', 'discount', 'tax']):
+            explanation = "Monetary value of the transaction."
+        elif any(kw in target_lower for kw in ['date', 'timestamp', 'time']):
+            explanation = "Temporal attribute of the event."
+        elif any(kw in target_lower for kw in ['category', 'type', 'status']):
+            explanation = "Classification or status indicator."
+            
+        if explanation:
+            if source_desc and explanation.lower() in source_desc.lower():
+                # Already present, don't repeat
+                pass
+            else:
+                if source_col != target_col:
+                    return f"{explanation} Derived from {source_col}. {source_desc or ''}".strip()
+                return f"{explanation} {source_desc or ''}".strip()
+            
+        return source_desc
+
+    @staticmethod
+    def check_semantic_mismatch(target_col, source_col):
+        """
+        Returns a penalty score if the columns are semantically incompatible.
+        """
+        t = target_col.lower()
+        s = source_col.lower()
+        
+        # ID vs Date/Value mismatch
+        is_t_id = 'id' in t or t.endswith('_id')
+        is_s_id = 'id' in s or s.endswith('_id')
+        
+        is_t_date = any(kw in t for kw in ['date', 'time', 'timestamp'])
+        is_s_date = any(kw in s for kw in ['date', 'time', 'timestamp'])
+        
+        if is_t_date and is_s_id:
+            return 0.4 # Significant penalty: Date should not map to ID
+            
+        if is_t_id and not is_s_id:
+             # Target is ID but source isn't - suspicious but maybe a rename?
+             # Let's check name similarity
+             if t.replace("_id", "") in s or s in t.replace("_id", ""):
+                 return 1.0
+             return 0.6
+             
+        return 1.0
+
 class LineageGraphTraverser:
     def __init__(self, project_id, location):
         self.project_id = project_id
@@ -47,16 +104,24 @@ class LineageGraphTraverser:
             return fqn.replace("bigquery:", "")
         return fqn
 
-    def get_column_lineage(self, target_entry_name, target_columns):
+    def _search_links(self, fqn, fields=None, search_type="target"):
         """
-        Fetches upstream column lineage for a given target entry.
+        Helper to call Data Lineage API searchLinks.
+        search_type: "target" for upstream, "source" for downstream.
         """
-        logger.info(f"Searching column lineage for {target_entry_name}...")
-        
-        credentials, project = google.auth.default()
-        auth_req = google.auth.transport.requests.Request()
-        credentials.refresh(auth_req)
-        token = credentials.token
+        # Try to get token from context first
+        try:
+            from context import get_oauth_token
+            token = get_oauth_token()
+        except ImportError:
+            token = None
+
+        if not token:
+            # Fallback to ADC
+            credentials, project = google.auth.default()
+            auth_req = google.auth.transport.requests.Request()
+            credentials.refresh(auth_req)
+            token = credentials.token
 
         headers = {
             "Authorization": f"Bearer {token}",
@@ -64,48 +129,70 @@ class LineageGraphTraverser:
         }
 
         parent = f"projects/{self.project_id}/locations/{self.location}"
-        
-        # NOTE: Using v1 searchLinks
         url = f"https://{self.location}-datalineage.googleapis.com/v1/{parent}:searchLinks"
         
+        body = {
+            search_type: {
+                "fullyQualifiedName": fqn
+            }
+        }
+        if fields:
+            body[search_type]["field"] = fields
+
+        response = requests.post(url, headers=headers, json=body)
+        response.raise_for_status()
+        return response.json().get("links", [])
+
+    def get_column_lineage(self, target_entry_name, target_columns):
+        """
+        Fetches upstream column lineage for a given target entry.
+        """
+        logger.info(f"Searching upstream column lineage for {target_entry_name}...")
         column_mappings = {}
 
         for col in target_columns:
-            body = {
-                "target": {
-                    "fullyQualifiedName": target_entry_name,
-                    "field": [col]
-                }
-            }
-            
             try:
-                response = requests.post(url, headers=headers, json=body)
-                response.raise_for_status()
-                data = response.json()
-                
-                # Parse links
-                found_upstream = False
-                for link in data.get("links", []):
+                links = self._search_links(target_entry_name, [col], "target")
+                if not links:
+                    continue
+
+                best_match = None
+                max_score = -1.0
+
+                for link in links:
                     source = link.get("source", {})
                     source_fqn = source.get("fullyQualifiedName")
                     source_fields = source.get("field", [])
                     
-                    if source_fqn and source_fields:
-                        upstream_col = source_fields[0]
-                        column_mappings[col] = {
-                            "source_fqn": source_fqn,
-                            "source_entity": source_fqn.split(':')[-1] if ':' in source_fqn else source_fqn,
-                            "source_column": upstream_col
-                        }
-                        logger.info(f"Lineage found: {col} <- {source_fqn}.{upstream_col}")
-                        found_upstream = True
-                        break 
+                    if not source_fqn or not source_fields:
+                        continue
+
+                    for src_field in source_fields:
+                        score = 0.5 
+                        if src_field == col: score = 1.0
+                        elif src_field.lower() == col.lower(): score = 0.95
+                        elif src_field.replace("_", "") == col.replace("_", ""): score = 0.9
+                        elif col in src_field or src_field in col: score = 0.8
+                        elif len(source_fields) == 1: score = 0.7
+
+                        penalty = TransformationEnricher.check_semantic_mismatch(col, src_field)
+                        score = score * penalty
+
+                        if score > max_score:
+                            max_score = score
+                            best_match = {
+                                "source_fqn": source_fqn,
+                                "source_entity": source_fqn.split(':')[-1] if ':' in source_fqn else source_fqn,
+                                "source_column": src_field,
+                                "confidence": round(score, 2),
+                                "semantic_penalty": True if penalty < 1.0 else False
+                            }
                 
-                if not found_upstream:
-                    logger.debug(f"No upstream found for {col} via API.")
+                if best_match:
+                    column_mappings[col] = best_match
 
             except Exception as e:
-                logger.warning(f"Failed to fetch lineage for column {col}: {e}")
+                logger.warning(f"Failed to fetch upstream lineage for column {col}: {e}")
         
         return column_mappings
 
@@ -114,53 +201,25 @@ class LineageGraphTraverser:
         Fetches downstream column lineage, optionally using Knowledge Engine insights.
         """
         logger.info(f"Searching downstream lineage for {source_entry_name}...")
-        
-        credentials, project = google.auth.default()
-        auth_req = google.auth.transport.requests.Request()
-        credentials.refresh(auth_req)
-        token = credentials.token
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=UTF-8"
-        }
-
-        parent = f"projects/{self.project_id}/locations/{self.location}"
-        url = f"https://{self.location}-datalineage.googleapis.com/v1/{parent}:searchLinks"
-        
         downstream_mappings = {} # Source Col -> List of Targets
-
-        # Normalize source entry for matching
         norm_source = self._normalize_fqn(source_entry_name)
 
         for col in source_columns:
-            # 1. Standard Lineage API
             targets = []
-            body = {
-                "source": {
-                    "fullyQualifiedName": source_entry_name,
-                    "field": [col]
-                }
-            }
-            
             try:
-                response = requests.post(url, headers=headers, json=body)
-                response.raise_for_status()
-                data = response.json()
-                
-                for link in data.get("links", []):
+                # 1. Standard Lineage API
+                links = self._search_links(source_entry_name, [col], "source")
+                for link in links:
                     target = link.get("target", {})
                     target_fqn = target.get("fullyQualifiedName")
                     target_fields = target.get("field", [])
                     
                     if target_fqn and target_fields:
-                        target_col = target_fields[0]
                         targets.append({
                             "target_fqn": target_fqn,
-                            "target_table": target_fqn.split(':')[-1] if ':' in target_fqn else target_fqn,
-                            "target_column": target_col
+                            "target_entity": target_fqn.split(':')[-1] if ':' in target_fqn else target_fqn,
+                            "target_column": target_fields[0]
                         })
-                        logger.info(f"Downstream found (API): {col} -> {target_fqn}.{target_col}")
 
             except Exception as e:
                 logger.warning(f"Failed to fetch downstream lineage for column {col}: {e}")
@@ -168,34 +227,22 @@ class LineageGraphTraverser:
             # 2. Check Knowledge Engine Insights
             if self.knowledge_insights:
                 for rel in self.knowledge_insights:
-                    # check left -> right
                     left_fqn = self._normalize_fqn(rel.get("leftSchemaPaths", {}).get("tableFqn", ""))
                     right_fqn = self._normalize_fqn(rel.get("rightSchemaPaths", {}).get("tableFqn", ""))
-                    
                     left_cols = rel.get("leftSchemaPaths", {}).get("paths", [])
                     right_cols = rel.get("rightSchemaPaths", {}).get("paths", [])
                     
-                    # If Source is Left, Target is Right
                     if left_fqn == norm_source and col in left_cols:
-                        # Find corresponding column index? usually just one matching pair or cross join
-                        # Assuming index 0 for now if lists are matched, or all to all?
-                        # Relationships usually mean "Join ON left.col = right.col" so 1:1 usually
-                        
                         if right_cols: 
-                            # Simplification: Map index 0 to index 0
-                            # Real extraction might need more logic if multiple cols
                             target_col = right_cols[0] 
-                            
-                            # Avoid duplicates
-                            existing = any(t['target_table'] == right_fqn and t['target_column'] == target_col for t in targets)
+                            existing = any(t['target_entity'] == right_fqn and t['target_column'] == target_col for t in targets)
                             if not existing:
                                 targets.append({
-                                    "target_fqn": right_fqn, # Use normalized as FQN or reconstruct?
-                                    "target_table": right_fqn,
+                                    "target_fqn": right_fqn,
+                                    "target_entity": right_fqn.split('.')[-1],
                                     "target_column": target_col,
                                     "source": "KNOWLEDGE_ENGINE"
                                 })
-                                logger.info(f"Downstream found (KnowledgeEngine): {col} -> {right_fqn}.{target_col}")
 
             if targets:
                 downstream_mappings[col] = targets
