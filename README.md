@@ -8,7 +8,7 @@ The solution focuses on:
 1.  **Synthetic Data Generation**: Creating complex retail data with built-in lineage relationships (e.g., `raw_transactions` -> `transactions`).
 2.  **Dataset & Table Insights**: Automating Data Documentation scans to generate column-level descriptions and dataset-level entity relationships.
 3.  **Agentic Data Steward**: A Gradio-based application for data stewards to scan, analyze, and propagate metadata globally.
-4.  **Enriched Lineage Propagation**: Combining official Data Lineage API with LLM-inferred schema relationships to automate metadata lifecycle.
+4.  **Multi-Hop Lineage Propagation**: Automatically traversing through multiple levels of transformation (e.g., A -> B -> C) to find metadata, even when intermediate tables are undocumented.
 
 ## Prerequisites
 
@@ -51,6 +51,7 @@ python3 ui/gradio_app.py
 *   **Estate Dashboard**: Scan your BigQuery datasets to identify columns missing descriptions.
 *   **Lineage Insights**: Analyze any table to see a holistic summary of its **Upstream sources** and **Downstream targets**.
 *   **Metadata Propagation**: Automatically fetch descriptions from upstream, enrich them with transformation logic, and apply them back to BigQuery with one click.
+*   **Multi-Hop Discovery**: Recursive lineage traversal that "hops" over missing descriptions in intermediate tables to find the root source.
 *   **OAuth Support**: Optional "Global Environment Settings" allow you to provide an OAuth token for user-specific actions. See [OAUTH_SETUP_GUIDE.md](OAUTH_SETUP_GUIDE.md) for more info.
 
 ## Key Components
@@ -58,7 +59,7 @@ python3 ui/gradio_app.py
 ### 1. Data Generation
 **Script**: `data_generation/generate_data.py`
 
-Generates synthetic retail data (Customers, Products, Orders, Transactions) and loads it into BigQuery. It also performs SQL transformations (`CTAS`) to establish lineage between "raw" and "derived" tables.
+Generates synthetic retail data (Customers, Products, Orders, Transactions) and loads it into BigQuery. It performs SQL transformations (`CTAS`) and creates views (e.g., `products_v`) to establish multi-hop lineage chains.
 
 **Usage**:
 ```bash
