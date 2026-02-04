@@ -138,7 +138,12 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
             preview_btn = gr.Button("Analyze Lineage & Preview Propagation", variant="primary")
             
             summary_output = gr.Markdown("Enter a table and click the button above to start analysis.")
-            preview_output = gr.Dataframe(label="Propagation Candidates", interactive=True, wrap=True)
+            gr.Markdown("*(Optional: Click any cell in the **Proposed Description** column to refine it before applying)*")
+            preview_output = gr.Dataframe(
+                label="Propagation Candidates (Edit 'Proposed Description' only)", 
+                interactive=True, 
+                wrap=True
+            )
             
             with gr.Row():
                 apply_btn = gr.Button("Apply Selection to BigQuery", variant="primary")

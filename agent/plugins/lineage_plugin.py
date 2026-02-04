@@ -81,67 +81,84 @@ class LineagePlugin(BasePlugin):
 
         return pd.DataFrame(missing_data)
 
+    def _find_description_recursive(self, target_fqn: str, column: str, depth: int = 0, max_depth: int = 5) -> Optional[Dict[str, Any]]:
+        """
+        Recursively searches upstream for a description.
+        Returns a dict with metadata if found, else None.
+        """
+        if depth >= max_depth:
+            return None
+            
+        # 1. Get immediate upstream
+        upstream = self._lineage_traverser.get_column_lineage(target_fqn, [column], depth=depth)
+        source = upstream.get(column)
+        
+        if not source:
+            return None
+            
+        # 2. Check if source has description
+        src_entity = source['source_fqn'].replace("bigquery:", "")
+        src_col = source['source_column']
+        
+        try:
+            client = self._get_bq_client()
+            src_table = client.get_table(src_entity)
+            for f in src_table.schema:
+                if f.name == src_col:
+                    if f.description:
+                        # Found it!
+                        return {
+                            "source_entity": source['source_entity'],
+                            "source_column": src_col,
+                            "description": f.description,
+                            "confidence": source['confidence'],
+                            "hop_depth": depth
+                        }
+                    else:
+                        # No description here, keep going up
+                        return self._find_description_recursive(source['source_fqn'], src_col, depth + 1, max_depth)
+        except Exception as e:
+            logger.warning(f"Failed to check desc for {src_entity}.{src_col}: {e}")
+            
+        return None
+
     def preview_propagation(self, dataset_id: str, target_table: str) -> pd.DataFrame:
         """
-        Simulates propagation for a specific table.
-        Returns candidates DataFrame.
+        Simulates propagation for a specific table with multi-hop support.
         """
         self._ensure_initialized()
-        # Re-using logic from propagate_metadata.py (simplified)
-        
         target_fqn = f"bigquery:{self.project_id}.{dataset_id}.{target_table}"
         client = self._get_bq_client()
         table_ref = f"{self.project_id}.{dataset_id}.{target_table}"
         table = client.get_table(table_ref)
-        target_schema = {f.name: f.description for f in table.schema}
-        
-        # Get Upstream
-        upstream_map = self._lineage_traverser.get_column_lineage(target_fqn, list(target_schema.keys()))
         
         candidates = []
-        for col, existing_desc in target_schema.items():
-            if existing_desc:
-                continue # Skip if exists
+        for field in table.schema:
+            if field.description:
+                continue
                 
-            source = upstream_map.get(col)
-            if source:
-                # Direct Lineage
-                candidates.append({
-                    "Target Column": col,
-                    "Source": source['source_entity'],
-                    "Source Column": source['source_column'],
-                    "Confidence": source.get('confidence', 1.0),
-                    "Proposed Description": "Fetched from upstream (simulation)", 
-                    "Type": "Lineage"
-                })
+            # Recursive search for this column
+            match = self._find_description_recursive(target_fqn, field.name)
             
-            # Simple simulation of fetching actual source desc
-            # In real full impl, we would fetch source table schema here.
-            # I will implement a basic fetch for the preview.
-        
-        # Enrich with descriptions
-        results = []
-        for cand in candidates:
-            # Hacky parse of source entity
-            src_entity = cand['Source'].replace("bigquery:", "")
-            # Assuming just project.dataset.table
-            try:
-                src_table = client.get_table(src_entity)
-                # Find col
-                for f in src_table.schema:
-                    if f.name == cand['Source Column']:
-                        # Use Enrichment Logic
-                        enriched_desc = TransformationEnricher.enrich_description(
-                            cand['Target Column'], 
-                            cand['Source Column'], 
-                            f.description
-                        )
-                        cand['Proposed Description'] = enriched_desc
-                        results.append(cand)
-            except Exception:
-                pass
+            if match:
+                # Enrich the found description
+                from lineage_propagation import TransformationEnricher
+                enriched_desc = TransformationEnricher.enrich_description(
+                    field.name, 
+                    match['source_column'], 
+                    match['description']
+                )
+                
+                candidates.append({
+                    "Target Column": field.name,
+                    "Source": match['source_entity'],
+                    "Source Column": match['source_column'],
+                    "Confidence": match['confidence'],
+                    "Proposed Description": enriched_desc,
+                    "Type": f"Lineage (Hop {match['hop_depth']})" if match['hop_depth'] > 0 else "Lineage"
+                })
 
-        return pd.DataFrame(results)
+        return pd.DataFrame(candidates)
 
     def get_lineage_summary(self, dataset_id: str, table_id: str) -> str:
         """
