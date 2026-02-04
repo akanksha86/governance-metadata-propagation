@@ -8,7 +8,39 @@ The solution focuses on:
 1.  **Synthetic Data Generation**: Creating complex retail data with built-in lineage relationships (e.g., `raw_transactions` -> `transactions`).
 2.  **Dataset & Table Insights**: Automating Data Documentation scans to generate column-level descriptions and dataset-level entity relationships.
 3.  **Agentic Data Steward**: A Gradio-based application for data stewards to scan, analyze, and propagate metadata globally.
-4.  **Multi-Hop Lineage Propagation**: Automatically traversing through multiple levels of transformation (e.g., A -> B -> C) to find metadata, even when intermediate tables are undocumented.
+4.  **Multi-Hop Lineage Propagation**: Propagates metadata across multiple transformation steps, even through undocumented intermediate tables or views.
+- **SQL-Based Logic Enrichment**: Extracts actual BigQuery SQL transformations to generate human-readable descriptions for computed columns.
+- **Gradio User Interface**: A streamlined UI for data stewards to scan, preview, and apply metadata changes.
+- **Steward CLI**: Command-line interface for headless scanning and propagation.
+
+## Getting Started
+
+### Prerequisites
+- Python 3.8+
+- Google Cloud Project with BigQuery and Data Lineage API enabled
+- Application Default Credentials (ADC) or OAuth Token
+
+### Setup
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+### Usage
+#### Gradio UI
+```bash
+python app.py
+```
+
+#### Steward CLI
+```bash
+# Scan for missing descriptions
+python steward_cli.py scan --dataset retail_syn_data
+
+# Preview and apply propagation
+python steward_cli.py apply --dataset retail_syn_data --table transactions
+```
 
 ## Prerequisites
 
