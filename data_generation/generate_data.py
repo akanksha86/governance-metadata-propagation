@@ -135,6 +135,16 @@ def create_derived_table(source_table, target_table, custom_query=None):
     job.result()
     print(f"Created {target_table} from {source_table} (Lineage established)")
 
+def create_view(source_table, view_name):
+    """Creates a view over a source table."""
+    view_id = f"{PROJECT_ID}.{DATASET_ID}.{view_name}"
+    query = f"CREATE OR REPLACE VIEW `{view_id}` AS SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.{source_table}`"
+    
+    # Execute
+    job = client.query(query)
+    job.result()
+    print(f"Created view {view_name} over {source_table}")
+
 if __name__ == "__main__":
     if not PROJECT_ID:
         print("Please set GOOGLE_CLOUD_PROJECT environment variable.")
@@ -176,5 +186,8 @@ if __name__ == "__main__":
     """
     create_derived_table("raw_transactions", "transactions", custom_query=transactions_query)
 
+    print("Creating Views for Multi-Hop Lineage Testing...")
+    create_view("transactions", "transactions_v")
+    create_view("products", "products_v")
     
     print("Done.")

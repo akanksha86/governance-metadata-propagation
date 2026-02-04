@@ -12,7 +12,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.oauth2.credentials import Credentials
 from google.cloud import bigquery
 from context import get_oauth_token
-from lineage_propagation import LineageGraphTraverser, TransformationEnricher
+from lineage_propagation import LineageGraphTraverser, TransformationEnricher, SQLFetcher
 from knowledge_engine import DescriptionPropagator
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ class LineagePlugin(BasePlugin):
         self.knowledge_json_path = knowledge_json_path
         self._lineage_traverser = None
         self._description_propagator = None
+        self._sql_fetcher = None
 
     def _get_credentials(self):
         token = get_oauth_token()
@@ -38,20 +39,15 @@ class LineagePlugin(BasePlugin):
 
     def _ensure_initialized(self):
         if not self._lineage_traverser:
-            # Note: LineageGraphTraverser might create its own clients. 
-            # Ideally we should pass credentials to it, but for now we rely on ADC or we need to refactor it.
-            # If LineageGraphTraverser uses `bigquery.Client()`, it will use ADC. 
-            # To support OAuth, we might need to monkeypatch or refactor LineageGraphTraverser.
-            # For this demo step, let's assume ADC for the internals OR that we will update LineageGraphTraverser later.
-            # But wait, the user wants OAuth. 
-            # Refactoring LineageGraphTraverser is safer.
-            # For this pass, I will instantiate it as is and warn if it doesn't support explicit creds.
             self._lineage_traverser = LineageGraphTraverser(self.project_id, self.location)
             if self.knowledge_json_path:
                 self._lineage_traverser.load_knowledge_insights(self.knowledge_json_path)
             
         if not self._description_propagator:
             self._description_propagator = DescriptionPropagator(self.knowledge_json_path)
+            
+        if not self._sql_fetcher:
+            self._sql_fetcher = SQLFetcher(self.project_id, self.location)
 
     def scan_for_missing_descriptions(self, dataset_id: str) -> pd.DataFrame:
         """
@@ -124,13 +120,16 @@ class LineagePlugin(BasePlugin):
 
     def preview_propagation(self, dataset_id: str, target_table: str) -> pd.DataFrame:
         """
-        Simulates propagation for a specific table with multi-hop support.
+        Simulates propagation for a specific table with multi-hop support and SQL parsing.
         """
         self._ensure_initialized()
         target_fqn = f"bigquery:{self.project_id}.{dataset_id}.{target_table}"
         client = self._get_bq_client()
         table_ref = f"{self.project_id}.{dataset_id}.{target_table}"
         table = client.get_table(table_ref)
+        
+        # Fetch transformation SQL once for the target table
+        transformation_sql = self._sql_fetcher.get_transformation_sql(dataset_id, target_table)
         
         candidates = []
         for field in table.schema:
@@ -141,12 +140,17 @@ class LineagePlugin(BasePlugin):
             match = self._find_description_recursive(target_fqn, field.name)
             
             if match:
+                # Extract SQL logic if possible
+                sql_expr = None
+                if transformation_sql:
+                    sql_expr = TransformationEnricher.extract_column_logic(transformation_sql, field.name)
+                
                 # Enrich the found description
-                from lineage_propagation import TransformationEnricher
                 enriched_desc = TransformationEnricher.enrich_description(
                     field.name, 
                     match['source_column'], 
-                    match['description']
+                    match['description'],
+                    sql_expr=sql_expr
                 )
                 
                 candidates.append({

@@ -5,22 +5,102 @@ import google.auth
 import google.auth.transport.requests
 from google.cloud import datacatalog_lineage_v1
 from google.api_core import exceptions
-
+from google.cloud import bigquery
+import re
+from typing import List, Dict, Any, Optional
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class TransformationEnricher:
-    @staticmethod
-    def enrich_description(target_col, source_col, source_desc):
-        """
-        Enriches the description based on transformation patterns.
-        """
-        explanation = ""
+class SQLFetcher:
+    """Fetches transformation SQL from BigQuery Information Schema."""
+    def __init__(self, project_id: str, location: str):
+        self.project_id = project_id
+        self.location = location
+        self.client = bigquery.Client(project=project_id)
+
+    def get_transformation_sql(self, dataset_id: str, table_id: str) -> Optional[str]:
+        """Queries Information Schema for the last SQL job that updated this table."""
+        region = self.location.split('-')[0] # approximate region mapping
+        if 'europe' in self.location: region = 'europe-west1' # handle europe specific
         
-        # Pattern matching for common fields
+        query = f"""
+        SELECT query
+        FROM `{self.project_id}.region-{region}.INFORMATION_SCHEMA.JOBS_BY_PROJECT`
+        WHERE destination_table.table_id = '{table_id}'
+        AND destination_table.dataset_id = '{dataset_id}'
+        AND statement_type IN ('CREATE_TABLE_AS_SELECT', 'INSERT', 'MERGE', 'UPDATE')
+        ORDER BY creation_time DESC
+        LIMIT 1
+        """
+        try:
+            query_job = self.client.query(query)
+            results = list(query_job.result())
+            if results:
+                return results[0].query
+        except Exception as e:
+            logger.warning(f"Failed to fetch SQL for {table_id}: {e}")
+        return None
+
+class TransformationEnricher:
+    """Provides semantic enrichment logic for propagated metadata."""
+    
+    @staticmethod
+    def check_semantic_mismatch(target_col: str, source_col: str) -> float:
+        """Applies penalties if column semantics seem way off."""
         target_lower = target_col.lower()
         source_lower = source_col.lower()
+
+        # Date vs ID mismatch
+        if "date" in target_lower and "id" in source_lower: return 0.2
+        if "id" in target_lower and "date" in source_lower: return 0.2
+
+        # Amount vs Flag mismatch
+        if "amount" in target_lower and ("flag" in source_lower or "is_" in source_lower): return 0.5
+
+        return 1.0
+
+    @staticmethod
+    def extract_column_logic(sql: str, target_col: str) -> Optional[str]:
+        """Attempts to extract the expression for a specific column from SQL SELECT."""
+        if not sql: return None
+        
+        # Simple cleanup
+        sql_clean = re.sub(r'--.*', '', sql) # remove comments
+        sql_clean = re.sub(r'\s+', ' ', sql_clean).strip()
+        
+        # Look for SELECT ... AS target_col or SELECT target_col AS ...
+        # Handling aliases and expressions
+        pattern = rf"([^,]*?)\s+as\s+`?{target_col}`?"
+        match = re.search(pattern, sql_clean, re.IGNORECASE)
+        
+        if match:
+            expr = match.group(1).strip()
+            # Clean up leading SELECT if present, and anything before it (like CREATE TABLE ... AS)
+            # Find the last 'SELECT' in the expression if it exists
+            last_select = re.split(r'\bSELECT\b', expr, flags=re.IGNORECASE)[-1]
+            return last_select.strip()
+        
+        return None
+
+    @staticmethod
+    def describe_sql_logic(expr: Optional[str]) -> str:
+        """Converts SQL expression into natural language hint."""
+        if not expr: return ""
+        
+        # Simple rule-based translation for common transforms
+        if "*" in expr and "1.1" in expr: return " (Adjusted for +10% tax/markup)"
+        if "*" in expr and "0.9" in expr: return " (Adjusted for -10% discount)"
+        if "CASE" in expr: return " (Categorized based on logical conditions)"
+        if "CAST" in expr: return " (Converted data type)"
+        
+        return f" (Calculated via logic: `{expr}`)"
+
+    @staticmethod
+    def enrich_description(target_col: str, source_col: str, original_desc: str, sql_expr: Optional[str] = None) -> str:
+        """Builds a polished description combining source and transformation context."""
+        explanation = ""
+        target_lower = target_col.lower()
         
         if any(kw in target_lower for kw in ['amount', 'price', 'cost', 'discount', 'tax']):
             explanation = "Monetary value of the transaction."
@@ -28,44 +108,30 @@ class TransformationEnricher:
             explanation = "Temporal attribute of the event."
         elif any(kw in target_lower for kw in ['category', 'type', 'status']):
             explanation = "Classification or status indicator."
-            
-        if explanation:
-            if source_desc and explanation.lower() in source_desc.lower():
-                # Already present, don't repeat
-                pass
-            else:
-                if source_col != target_col:
-                    return f"{explanation} Derived from {source_col}. {source_desc or ''}".strip()
-                return f"{explanation} {source_desc or ''}".strip()
-            
-        return source_desc
 
-    @staticmethod
-    def check_semantic_mismatch(target_col, source_col):
-        """
-        Returns a penalty score if the columns are semantically incompatible.
-        """
-        t = target_col.lower()
-        s = source_col.lower()
+        # Start with the best available description
+        description = original_desc or ""
         
-        # ID vs Date/Value mismatch
-        is_t_id = 'id' in t or t.endswith('_id')
-        is_s_id = 'id' in s or s.endswith('_id')
-        
-        is_t_date = any(kw in t for kw in ['date', 'time', 'timestamp'])
-        is_s_date = any(kw in s for kw in ['date', 'time', 'timestamp'])
-        
-        if is_t_date and is_s_id:
-            return 0.4 # Significant penalty: Date should not map to ID
+        # If we have an explanation and it's not already in the description, prepend it
+        if explanation and explanation.lower() not in description.lower():
+            if description:
+                description = f"{explanation} {description}"
+            else:
+                description = explanation
+
+        # Add source context if significantly different
+        if target_col.lower() != source_col.lower():
+            if description:
+                description += f" (Mapped from `{source_col}`)"
+            else:
+                description = f"Propagated from `{source_col}`"
             
-        if is_t_id and not is_s_id:
-             # Target is ID but source isn't - suspicious but maybe a rename?
-             # Let's check name similarity
-             if t.replace("_id", "") in s or s in t.replace("_id", ""):
-                 return 1.0
-             return 0.6
-             
-        return 1.0
+        # Add SQL logic context
+        if sql_expr:
+            logic_hint = TransformationEnricher.describe_sql_logic(sql_expr)
+            description += logic_hint
+
+        return description.strip()
 
 class LineageGraphTraverser:
     def __init__(self, project_id, location):
