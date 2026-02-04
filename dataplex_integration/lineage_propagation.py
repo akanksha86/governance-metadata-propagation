@@ -97,8 +97,8 @@ class TransformationEnricher:
         return f" (Calculated via logic: `{expr}`)"
 
     @staticmethod
-    def enrich_description(target_col: str, source_col: str, original_desc: str, sql_expr: Optional[str] = None) -> str:
-        """Builds a polished description combining source and transformation context."""
+    def enrich_description(target_col: str, source_col: str, original_desc: str, sql_hints: List[str] = None) -> str:
+        """Builds a polished description combining source and multi-hop transformation context."""
         explanation = ""
         target_lower = target_col.lower()
         
@@ -126,10 +126,20 @@ class TransformationEnricher:
             else:
                 description = f"Propagated from `{source_col}`"
             
-        # Add SQL logic context
-        if sql_expr:
-            logic_hint = TransformationEnricher.describe_sql_logic(sql_expr)
-            description += logic_hint
+        # Add SQL logic context from all hops
+        if sql_hints:
+            # Filter out trivial passthroughs (where hint is just the column name or table.column)
+            meaningful_hints = []
+            for hint in sql_hints:
+                # Trivial if it's just 'col', 'alias.col', or '`col`'
+                is_trivial = re.match(r'^[\w\.]+$', hint) or hint.strip() == f"`{target_col}`"
+                if not is_trivial:
+                    meaningful_hints.append(hint)
+            
+            for hint in meaningful_hints:
+                logic_hint = TransformationEnricher.describe_sql_logic(hint)
+                if logic_hint.strip() and logic_hint not in description:
+                    description += logic_hint
 
         return description.strip()
 

@@ -47,7 +47,7 @@ class TestSQLEnrichment(unittest.TestCase):
         sql_expr = "t.amount * 1.1"
         
         enriched = TransformationEnricher.enrich_description(
-            target_col, source_col, original_desc, sql_expr=sql_expr
+            target_col, source_col, original_desc, sql_hints=[sql_expr]
         )
         
         self.assertIn("Total order amount", enriched)
@@ -72,7 +72,8 @@ class TestSQLEnrichment(unittest.TestCase):
             "source_column": "amount",
             "description": "Total order amount",
             "confidence": 1.0,
-            "hop_depth": 0
+            "hop_depth": 0,
+            "accumulated_logic": ["t.amount * 1.1"]
         })
         
         # Run Preview
@@ -83,6 +84,29 @@ class TestSQLEnrichment(unittest.TestCase):
         row = results_df.iloc[0]
         self.assertEqual(row["Target Column"], "amount_taxed")
         self.assertIn("+10% tax/markup", row["Proposed Description"])
+
+    def test_multi_hop_synthesis(self):
+        # View -> Table -> Raw
+        # Case: amount_taxed in View is just a passthrough from Table
+        # amount_taxed in Table is a transformation from Raw.amount
+        
+        target_col = "amount_taxed"
+        source_col = "amount"
+        original_desc = "Base amount"
+        
+        # Hints: ['amount_taxed', 'amount * 1.1']
+        # The 'amount_taxed' hint should be ignored as trivial passthrough
+        # The 'amount * 1.1' should be kept
+        sql_hints = [target_col, "t.amount * 1.1"]
+        
+        enriched = TransformationEnricher.enrich_description(
+            target_col, source_col, original_desc, sql_hints=sql_hints
+        )
+        
+        self.assertIn("Base amount", enriched)
+        self.assertIn("+10% tax/markup", enriched)
+        # Verify it didn't add "Calculated via logic: amount_taxed"
+        self.assertNotIn("logic: `amount_taxed`", enriched)
 
 if __name__ == '__main__':
     unittest.main()

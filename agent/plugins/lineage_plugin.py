@@ -77,11 +77,13 @@ class LineagePlugin(BasePlugin):
 
         return pd.DataFrame(missing_data)
 
-    def _find_description_recursive(self, target_fqn: str, column: str, depth: int = 0, max_depth: int = 5) -> Optional[Dict[str, Any]]:
+    def _find_description_recursive(self, target_fqn: str, column: str, depth: int = 0, max_depth: int = 5, accumulated_logic: List[str] = None) -> Optional[Dict[str, Any]]:
         """
-        Recursively searches upstream for a description.
-        Returns a dict with metadata if found, else None.
+        Recursively searches upstream for a description, accumulating SQL logic along the way.
         """
+        if accumulated_logic is None:
+            accumulated_logic = []
+            
         if depth >= max_depth:
             return None
             
@@ -92,7 +94,21 @@ class LineagePlugin(BasePlugin):
         if not source:
             return None
             
-        # 2. Check if source has description
+        # 2. Extract SQL logic for the CURRENT target column if possible
+        # target_fqn is like 'bigquery:project.dataset.table'
+        try:
+            parts = target_fqn.replace("bigquery:", "").split('.')
+            if len(parts) == 3:
+                ds_id, tab_id = parts[1], parts[2]
+                sql = self._sql_fetcher.get_transformation_sql(ds_id, tab_id)
+                if sql:
+                    logic = TransformationEnricher.extract_column_logic(sql, column)
+                    if logic:
+                        accumulated_logic.append(logic)
+        except Exception as e:
+            logger.debug(f"Failed to extract intermediate SQL logic for {target_fqn}: {e}")
+
+        # 3. Check if source has description
         src_entity = source['source_fqn'].replace("bigquery:", "")
         src_col = source['source_column']
         
@@ -108,11 +124,12 @@ class LineagePlugin(BasePlugin):
                             "source_column": src_col,
                             "description": f.description,
                             "confidence": source['confidence'],
-                            "hop_depth": depth
+                            "hop_depth": depth,
+                            "accumulated_logic": accumulated_logic
                         }
                     else:
                         # No description here, keep going up
-                        return self._find_description_recursive(source['source_fqn'], src_col, depth + 1, max_depth)
+                        return self._find_description_recursive(source['source_fqn'], src_col, depth + 1, max_depth, accumulated_logic)
         except Exception as e:
             logger.warning(f"Failed to check desc for {src_entity}.{src_col}: {e}")
             
@@ -128,9 +145,6 @@ class LineagePlugin(BasePlugin):
         table_ref = f"{self.project_id}.{dataset_id}.{target_table}"
         table = client.get_table(table_ref)
         
-        # Fetch transformation SQL once for the target table
-        transformation_sql = self._sql_fetcher.get_transformation_sql(dataset_id, target_table)
-        
         candidates = []
         for field in table.schema:
             if field.description:
@@ -140,17 +154,12 @@ class LineagePlugin(BasePlugin):
             match = self._find_description_recursive(target_fqn, field.name)
             
             if match:
-                # Extract SQL logic if possible
-                sql_expr = None
-                if transformation_sql:
-                    sql_expr = TransformationEnricher.extract_column_logic(transformation_sql, field.name)
-                
-                # Enrich the found description
+                # Enrich the found description using accumulated logic
                 enriched_desc = TransformationEnricher.enrich_description(
                     field.name, 
                     match['source_column'], 
                     match['description'],
-                    sql_expr=sql_expr
+                    sql_hints=match.get('accumulated_logic', [])
                 )
                 
                 candidates.append({
