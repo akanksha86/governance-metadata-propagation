@@ -70,8 +70,8 @@ class TransformationEnricher:
         sql_clean = re.sub(r'\s+', ' ', sql_clean).strip()
         
         # Look for SELECT ... AS target_col or SELECT target_col AS ...
-        # Handling aliases and expressions
-        pattern = rf"([^,]*?)\s+as\s+`?{target_col}`?"
+        # Use word boundaries \b to ensure exact matches only (e.g. 'amount' vs 'amount_discounted')
+        pattern = rf"([^,]*?)\s+as\s+`?\b{target_col}\b`?"
         match = re.search(pattern, sql_clean, re.IGNORECASE)
         
         if match:

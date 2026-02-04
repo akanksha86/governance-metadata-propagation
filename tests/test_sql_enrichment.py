@@ -23,6 +23,7 @@ class TestSQLEnrichment(unittest.TestCase):
         CREATE OR REPLACE TABLE `governance-agent.retail_syn_data.transactions` AS
         SELECT 
             t.amount * 1.1 as amount_taxed,
+            t.amount * 0.9 as amount_discounted,
             CASE WHEN t.amount > 100 THEN 'HIGH' ELSE 'LOW' END as val_cat
         FROM `raw_transactions` t
         """
@@ -34,6 +35,10 @@ class TestSQLEnrichment(unittest.TestCase):
         # Test val_cat
         expr = TransformationEnricher.extract_column_logic(sql, "val_cat")
         self.assertEqual(expr, "CASE WHEN t.amount > 100 THEN 'HIGH' ELSE 'LOW' END")
+
+        # Regression Test for Prefix issue: 'amount' should NOT match 'amount_discounted'
+        expr_prefix = TransformationEnricher.extract_column_logic(sql, "amount")
+        self.assertIsNone(expr_prefix, "Should not return logic for 'amount' when it only appears as a prefix of 'amount_discounted'")
 
     def test_description_enrichment_with_sql(self):
         original_desc = "Total order amount"
