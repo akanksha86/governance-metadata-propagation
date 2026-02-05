@@ -8,8 +8,8 @@ PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
 LOCATION = "europe-west1" # For Scans, must be a supported region
 DATASET_ID = "retail_syn_data"
 
-def create_dq_scan(table_name):
-    client = dataplex_v1.DataScanServiceClient()
+def create_dq_scan(table_name, credentials=None):
+    client = dataplex_v1.DataScanServiceClient(credentials=credentials)
     parent = f"projects/{PROJECT_ID}/locations/{LOCATION}"
     scan_id = f"dq-scan-{table_name}"
     
@@ -55,8 +55,8 @@ def create_dq_scan(table_name):
         print(f"DQ scan failed for {table_name}: {e}")
 
 
-def create_profiling_scan(table_name):
-    client = dataplex_v1.DataScanServiceClient()
+def create_profiling_scan(table_name, credentials=None):
+    client = dataplex_v1.DataScanServiceClient(credentials=credentials)
     parent = f"projects/{PROJECT_ID}/locations/{LOCATION}"
     scan_id = f"profile-{table_name}"
     
@@ -85,8 +85,8 @@ def create_profiling_scan(table_name):
         traceback.print_exc()
         print(f"Profiling scan failed for {table_name}: {e}")
 
-def run_scan(scan_id):
-    client = dataplex_v1.DataScanServiceClient()
+def run_scan(scan_id, credentials=None):
+    client = dataplex_v1.DataScanServiceClient(credentials=credentials)
     name = f"projects/{PROJECT_ID}/locations/{LOCATION}/dataScans/{scan_id}"
     try:
         client.run_data_scan(name=name)

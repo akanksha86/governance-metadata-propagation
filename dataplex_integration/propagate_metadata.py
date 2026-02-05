@@ -13,9 +13,8 @@ from knowledge_engine import DescriptionPropagator
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-@functools.lru_cache(maxsize=128)
-def fetch_table_schema(project_id, dataset_id, table_id):
-    client = bigquery.Client(project=project_id)
+def fetch_table_schema(project_id, dataset_id, table_id, credentials=None):
+    client = bigquery.Client(project=project_id, credentials=credentials)
     table_ref = f"{project_id}.{dataset_id}.{table_id}"
     try:
         table = client.get_table(table_ref)
@@ -24,8 +23,8 @@ def fetch_table_schema(project_id, dataset_id, table_id):
         logger.error(f"Error fetching table {table_ref}: {e}")
         return {}
 
-def update_column_description(project_id, dataset_id, table_id, column_name, description):
-    client = bigquery.Client(project=project_id)
+def update_column_description(project_id, dataset_id, table_id, column_name, description, credentials=None):
+    client = bigquery.Client(project=project_id, credentials=credentials)
     table_ref = f"{project_id}.{dataset_id}.{table_id}"
     try:
         table = client.get_table(table_ref)
@@ -67,7 +66,7 @@ def log_for_steward_review(project_id, dataset_id, table_id, column, description
         })
     logger.info(f"Logged {table_id}.{column} for Steward Review (Confidence: {confidence})")
 
-def propagate_pull(project_id, dataset_id, target_table, lineage_traverser, description_propagator, mode):
+def propagate_pull(project_id, dataset_id, target_table, lineage_traverser, description_propagator, mode, credentials=None):
     """
     Pulls metadata from Upstream -> Target Table
     """
@@ -75,7 +74,7 @@ def propagate_pull(project_id, dataset_id, target_table, lineage_traverser, desc
     target_fqn = f"bigquery:{project_id}.{dataset_id}.{target_table}"
     
     # 1. Get Downstream Schema (Target)
-    target_schema = fetch_table_schema(project_id, dataset_id, target_table)
+    target_schema = fetch_table_schema(project_id, dataset_id, target_table, credentials=credentials)
     if not target_schema:
         return
 
@@ -101,7 +100,7 @@ def propagate_pull(project_id, dataset_id, target_table, lineage_traverser, desc
             parts = clean_entity.split('.')
             if len(parts) == 3:
                 src_proj, src_ds, src_tab = parts
-                src_schema = fetch_table_schema(src_proj, src_ds, src_tab)
+                src_schema = fetch_table_schema(src_proj, src_ds, src_tab, credentials=credentials)
                 src_desc = src_schema.get(source_col)
                 
                 if src_desc:
@@ -138,7 +137,7 @@ def propagate_pull(project_id, dataset_id, target_table, lineage_traverser, desc
             if confidence > 0.90:
                 logger.info(f"High Confidence ({confidence}) for {target_col}: Auto-Applying.")
                 if mode == 'apply':
-                   update_column_description(project_id, dataset_id, target_table, target_col, desc)
+                   update_column_description(project_id, dataset_id, target_table, target_col, desc, credentials=credentials)
             elif confidence >= 0.70:
                 logger.info(f"Moderate Confidence ({confidence}) for {target_col}: Logging for Review.")
                 if mode == 'apply':
@@ -150,7 +149,7 @@ def propagate_pull(project_id, dataset_id, target_table, lineage_traverser, desc
 
     logger.info("--- PULL Propagation Finished ---")
 
-def propagate_push(project_id, dataset_id, source_table, lineage_traverser, description_propagator, mode):
+def propagate_push(project_id, dataset_id, source_table, lineage_traverser, description_propagator, mode, credentials=None):
     """
     Pushes metadata from Source Table -> Downstream Targets
     """
@@ -158,7 +157,7 @@ def propagate_push(project_id, dataset_id, source_table, lineage_traverser, desc
     source_fqn = f"bigquery:{project_id}.{dataset_id}.{source_table}"
         
     # 1. Get Source Schema
-    source_schema = fetch_table_schema(project_id, dataset_id, source_table)
+    source_schema = fetch_table_schema(project_id, dataset_id, source_table, credentials=credentials)
     if not source_schema:
         logger.error("Could not fetch source schema.")
         return
@@ -195,7 +194,7 @@ def propagate_push(project_id, dataset_id, source_table, lineage_traverser, desc
             logger.warning(f"Skipping table ref {t_table_ref} (format not supported)")
             continue
 
-        t_schema = fetch_table_schema(t_proj, t_ds, t_tab)
+        t_schema = fetch_table_schema(t_proj, t_ds, t_tab, credentials=credentials)
         
         for update in updates:
             t_col = update['column']
@@ -212,7 +211,7 @@ def propagate_push(project_id, dataset_id, source_table, lineage_traverser, desc
                 if confidence > 0.90:
                     logger.info(f"Propagating to {t_tab}.{t_col} from {source_info}: {new_desc}")
                     if mode == 'apply':
-                        update_column_description(t_proj, t_ds, t_tab, t_col, new_desc)
+                        update_column_description(t_proj, t_ds, t_tab, t_col, new_desc, credentials=credentials)
                 elif confidence >= 0.70:
                     logger.info(f"Moderate Confidence ({confidence}) for {t_tab}.{t_col}: Logging for Review.")
                     if mode == 'apply':

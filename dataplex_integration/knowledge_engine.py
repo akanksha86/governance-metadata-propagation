@@ -1,4 +1,5 @@
 import os
+from typing import Optional, Any
 import time
 import json
 from google.cloud import dataplex_v1
@@ -34,9 +35,9 @@ class DescriptionPropagator:
         except Exception as e:
             print(f"Failed to load insights from {self.json_path}: {e}")
 
-def update_bq_dataset_labels(dataset_id, scan_id):
+def update_bq_dataset_labels(dataset_id, scan_id, credentials: Optional[Any] = None):
     """Updates BigQuery dataset labels to enable Dataplex Insights publishing."""
-    client = bigquery.Client(project=PROJECT_ID)
+    client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
     dataset_ref = f"{PROJECT_ID}.{dataset_id}"
     
     try:
@@ -67,9 +68,9 @@ def update_bq_dataset_labels(dataset_id, scan_id):
     except Exception as e:
         print(f"[{dataset_id}] Failed to update BQ dataset labels: {e}")
 
-def create_and_start_dataset_scan():
+def create_and_start_dataset_scan(credentials: Optional[Any] = None):
     """Creates (if needed) and starts a Dataset-level Data Documentation scan."""
-    client = dataplex_v1.DataScanServiceClient()
+    client = dataplex_v1.DataScanServiceClient(credentials=credentials)
     parent = f"projects/{PROJECT_ID}/locations/{LOCATION}"
     # Dataset scan ID
     scan_id = f"doc-scan-dataset-{DATASET_ID.replace('_', '-')}"
@@ -95,7 +96,7 @@ def create_and_start_dataset_scan():
         operation.result()
     
     # 2. Configure BigQuery Dataset Labels for Publishing
-    update_bq_dataset_labels(DATASET_ID, scan_id)
+    update_bq_dataset_labels(DATASET_ID, scan_id, credentials=credentials)
 
     # 3. Run Scan
     print(f"[{DATASET_ID}] Starting scan...")
@@ -130,12 +131,12 @@ def extract_and_save_insights(job, output_file="knowledge_insights.json"):
     except Exception as e:
         print(f"[{DATASET_ID}] Failed to save insights: {e}")
 
-def wait_for_job(job_name):
+def wait_for_job(job_name, credentials: Optional[Any] = None):
     """Waits for the job to complete and returns the full job object."""
     if not job_name:
         return None
         
-    client = dataplex_v1.DataScanServiceClient()
+    client = dataplex_v1.DataScanServiceClient(credentials=credentials)
     print(f"Waiting for scan job {job_name} to complete...")
     
     while True:

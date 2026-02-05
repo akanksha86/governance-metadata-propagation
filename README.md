@@ -30,7 +30,7 @@ The solution focuses on:
 ### Usage
 #### Gradio UI
 ```bash
-python app.py
+python3 ui/gradio_app.py
 ```
 
 #### Steward CLI
@@ -66,9 +66,23 @@ python steward_cli.py apply --dataset retail_syn_data --table transactions
     ```
 4.  Install dependencies:
     ```bash
-    pip install -r dataplex_integration/requirements.txt
-    pip install gradio pandas requests google-cloud-datacatalog-lineage
+    pip install -r requirements.txt
     ```
+
+## Authentication
+
+This project supports two authentication modes for interacting with GCP (BigQuery, Dataplex, Lineage):
+
+1.  **Application Default Credentials (ADC)**:
+    - Default mode for local development and CLI use.
+    - Run `gcloud auth application-default login` to set up.
+    - The `steward_cli.py` and the core logic fallback to ADC automatically.
+
+2.  **OAuth 2.0 (Login with Google)**:
+    - Used by the **Agentic Data Steward App** (Gradio) to allow users to sign in with their own identities.
+    - Requires setting up an OAuth Client ID in the Google Cloud Console.
+    - **Instructions**: Detailed steps for setting up OAuth of the GCP console and `.env` file are found in [OAUTH_SETUP_GUIDE.md](OAUTH_SETUP_GUIDE.md).
+
 
 ## 🚀 The Agentic Data Steward App
 

@@ -10,9 +10,9 @@ PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
 LOCATION = "europe-west1"
 DATASET_ID = "retail_syn_data"
 
-def update_bq_labels(table_name, scan_id):
+def update_bq_labels(table_name, scan_id, credentials=None):
     """Updates BigQuery table labels to enable Dataplex Insights publishing."""
-    client = bigquery.Client(project=PROJECT_ID)
+    client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
     table_ref = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
     
     try:
@@ -43,9 +43,9 @@ def update_bq_labels(table_name, scan_id):
     except Exception as e:
         print(f"[{table_name}] Failed to update BQ labels: {e}")
 
-def create_and_start_scan(table_name):
+def create_and_start_scan(table_name, credentials=None):
     """Creates (if needed) and starts a Data Documentation scan."""
-    client = dataplex_v1.DataScanServiceClient()
+    client = dataplex_v1.DataScanServiceClient(credentials=credentials)
     parent = f"projects/{PROJECT_ID}/locations/{LOCATION}"
     scan_id = f"doc-scan-{table_name.replace('_', '-')}"
     scan_name = f"{parent}/dataScans/{scan_id}"
@@ -70,7 +70,7 @@ def create_and_start_scan(table_name):
     
     # 2. Configure BigQuery Labels for Publishing
     # This must be done so Dataplex knows where to push the results
-    update_bq_labels(table_name, scan_id)
+    update_bq_labels(table_name, scan_id, credentials=credentials)
 
     # 3. Run Scan
     print(f"[{table_name}] Starting scan...")
@@ -81,9 +81,9 @@ def create_and_start_scan(table_name):
         print(f"[{table_name}] Failed to start scan: {e}")
         return table_name, None
 
-def wait_for_jobs(jobs_map):
+def wait_for_jobs(jobs_map, credentials=None):
     """Waits for all jobs to complete."""
-    client = dataplex_v1.DataScanServiceClient()
+    client = dataplex_v1.DataScanServiceClient(credentials=credentials)
     pending = list(jobs_map.keys())
     
     while pending:

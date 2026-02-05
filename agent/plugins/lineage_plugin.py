@@ -11,7 +11,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../d
 from google.adk.plugins.base_plugin import BasePlugin
 from google.oauth2.credentials import Credentials
 from google.cloud import bigquery
-from context import get_oauth_token
+from context import get_oauth_token, get_credentials
 from lineage_propagation import LineageGraphTraverser, TransformationEnricher, SQLFetcher
 from knowledge_engine import DescriptionPropagator
 
@@ -28,18 +28,18 @@ class LineagePlugin(BasePlugin):
         self._sql_fetcher = None
 
     def _get_credentials(self):
-        token = get_oauth_token()
-        if token:
-            return Credentials(token=token)
-        return None  # Fallback to ADC if no token
+        return get_credentials(self.project_id)
 
     def _get_bq_client(self):
         creds = self._get_credentials()
         return bigquery.Client(project=self.project_id, credentials=creds)
 
     def _ensure_initialized(self):
+        creds = self._get_credentials()
+        token = get_oauth_token()
+        
         if not self._lineage_traverser:
-            self._lineage_traverser = LineageGraphTraverser(self.project_id, self.location)
+            self._lineage_traverser = LineageGraphTraverser(self.project_id, self.location, token=token)
             if self.knowledge_json_path:
                 self._lineage_traverser.load_knowledge_insights(self.knowledge_json_path)
             
@@ -47,7 +47,7 @@ class LineagePlugin(BasePlugin):
             self._description_propagator = DescriptionPropagator(self.knowledge_json_path)
             
         if not self._sql_fetcher:
-            self._sql_fetcher = SQLFetcher(self.project_id, self.location)
+            self._sql_fetcher = SQLFetcher(self.project_id, self.location, credentials=creds)
 
     def scan_for_missing_descriptions(self, dataset_id: str) -> pd.DataFrame:
         """

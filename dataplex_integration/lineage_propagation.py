@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 class SQLFetcher:
     """Fetches transformation SQL from BigQuery Information Schema."""
-    def __init__(self, project_id: str, location: str):
+    def __init__(self, project_id: str, location: str, credentials: Optional[Any] = None):
         self.project_id = project_id
         self.location = location
-        self.client = bigquery.Client(project=project_id)
+        self.client = bigquery.Client(project=project_id, credentials=credentials)
 
     def get_transformation_sql(self, dataset_id: str, table_id: str) -> Optional[str]:
         """Queries Information Schema for the last SQL job that updated this table."""
@@ -144,9 +144,10 @@ class TransformationEnricher:
         return description.strip()
 
 class LineageGraphTraverser:
-    def __init__(self, project_id, location):
+    def __init__(self, project_id, location, token: Optional[str] = None):
         self.project_id = project_id
         self.location = location
+        self.token = token
         self.client = datacatalog_lineage_v1.LineageClient()
         self.knowledge_insights = []
 
@@ -185,13 +186,8 @@ class LineageGraphTraverser:
         Helper to call Data Lineage API searchLinks.
         search_type: "target" for upstream, "source" for downstream.
         """
-        # Try to get token from context first
-        try:
-            from context import get_oauth_token
-            token = get_oauth_token()
-        except ImportError:
-            token = None
-
+        token = self.token
+        
         if not token:
             # Fallback to ADC
             credentials, project = google.auth.default()
