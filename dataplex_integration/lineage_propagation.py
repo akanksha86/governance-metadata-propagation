@@ -88,12 +88,38 @@ class TransformationEnricher:
         """Converts SQL expression into natural language hint."""
         if not expr: return ""
         
-        # Simple rule-based translation for common transforms
-        if "*" in expr and "1.1" in expr: return " (Adjusted for +10% tax/markup)"
-        if "*" in expr and "0.9" in expr: return " (Adjusted for -10% discount)"
-        if "CASE" in expr: return " (Categorized based on logical conditions)"
-        if "CAST" in expr: return " (Converted data type)"
-        
+        expr_upper = expr.upper()
+
+        # 1. Type Conversion
+        if "CAST(" in expr_upper or "SAFE_CAST(" in expr_upper:
+            return " (Converted data type)"
+            
+        # 2. Null Handling
+        if any(kw in expr_upper for kw in ["COALESCE(", "IFNULL(", "NULLIF("]):
+            return " (Handles missing values)"
+            
+        # 3. Numerical Operations
+        if any(kw in expr_upper for kw in ["ROUND(", "CEIL(", "FLOOR(", "TRUNC("]):
+            return " (Numerical rounding applied)"
+        if any(op in expr for op in ["*", "/", "+", "-"]) and any(char.isdigit() for char in expr):
+            return " (Value adjustment applied)"
+
+        # 4. String Formatting
+        if any(kw in expr_upper for kw in ["UPPER(", "LOWER(", "TRIM(", "CONCAT(", "SUBSTR("]):
+            return " (String formatting applied)"
+
+        # 5. Date/Time Extractions
+        if "EXTRACT(" in expr_upper:
+            return " (Date/Time component extracted)"
+
+        # 6. Logical Branching
+        if "CASE" in expr_upper or "IF(" in expr_upper:
+            return " (Conditional logic applied)"
+
+        # 7. Safe Execution
+        if "SAFE." in expr_upper:
+            return " (Safe execution applied)"
+            
         return f" (Calculated via logic: `{expr}`)"
 
     @staticmethod
