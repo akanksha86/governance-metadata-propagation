@@ -15,14 +15,20 @@ EXPORT_DATASET_ID = "governance_export"
 EXPORT_TABLE_ID = "metadata_export"
 GCS_BUCKET_NAME = f"{PROJECT_ID}-dataplex-export"
 
-def get_access_token():
+def get_access_token(credentials=None):
+    if credentials:
+        if not credentials.valid:
+            request = google.auth.transport.requests.Request()
+            credentials.refresh(request)
+        return credentials.token
+    
     credentials, project = google.auth.default()
     request = google.auth.transport.requests.Request()
     credentials.refresh(request)
     return credentials.token
 
-def create_gcs_bucket():
-    client = storage.Client(project=PROJECT_ID)
+def create_gcs_bucket(credentials=None):
+    client = storage.Client(project=PROJECT_ID, credentials=credentials)
     bucket_name = GCS_BUCKET_NAME
     try:
         bucket = client.get_bucket(bucket_name)
@@ -32,8 +38,8 @@ def create_gcs_bucket():
         print(f"Created bucket {bucket_name} in {LOCATION}")
     return bucket_name
 
-def run_metadata_export():
-    access_token = get_access_token()
+def run_metadata_export(credentials=None, token=None):
+    access_token = token or get_access_token(credentials=credentials)
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
@@ -67,11 +73,11 @@ def run_metadata_export():
     print(f"Job started: {job_info.get('name')}")
     return job_info
 
-def wait_for_job(job_info):
+def wait_for_job(job_info, credentials=None, token=None):
     if not job_info:
         return
     
-    access_token = get_access_token()
+    access_token = token or get_access_token(credentials=credentials)
     headers = {
         "Authorization": f"Bearer {access_token}",
     }
@@ -108,8 +114,8 @@ def wait_for_job(job_info):
     
     return job_info
 
-def create_bigquery_external_table():
-    client = bigquery.Client(project=PROJECT_ID)
+def create_bigquery_external_table(credentials=None):
+    client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
     
     # Create dataset if not exists
     dataset_id = f"{PROJECT_ID}.{EXPORT_DATASET_ID}"
@@ -173,8 +179,8 @@ def create_bigquery_external_table():
     client.create_table(table)
     print(f"Created external table {table_id} pointing to gs://{GCS_BUCKET_NAME}/*")
 
-def create_native_table():
-    client = bigquery.Client(project=PROJECT_ID)
+def create_native_table(credentials=None):
+    client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
     dataset_id = f"{PROJECT_ID}.{EXPORT_DATASET_ID}"
     external_table_id = f"{dataset_id}.{EXPORT_TABLE_ID}"
     native_table_id = f"{dataset_id}.{EXPORT_TABLE_ID}_native"

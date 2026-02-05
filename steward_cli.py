@@ -15,19 +15,19 @@ except ImportError:
 
 def main():
     parser = argparse.ArgumentParser(description="Agentic Data Steward CLI")
-    parser.add_argument("--project", default=os.environ.get("GOOGLE_CLOUD_PROJECT", "governance-agent"), help="GCP Project ID")
+    parser.add_argument("--project", "--project_id", dest="project", default=os.environ.get("GOOGLE_CLOUD_PROJECT", "governance-agent"), help="GCP Project ID")
     parser.add_argument("--location", default="europe-west1", help="GCP Location")
     
     subparsers = parser.add_subparsers(dest="command", help="Commands")
     
     # Scan command
     scan_parser = subparsers.add_parser("scan", help="Scan dataset for missing descriptions")
-    scan_parser.add_argument("--dataset", required=True, help="BigQuery Dataset ID")
+    scan_parser.add_argument("--dataset", "--dataset_id", dest="dataset", required=True, help="BigQuery Dataset ID")
     
     # Apply command
     apply_parser = subparsers.add_parser("apply", help="Preview and apply propagation for a table")
-    apply_parser.add_argument("--dataset", required=True, help="BigQuery Dataset ID")
-    apply_parser.add_argument("--table", required=True, help="BigQuery Table ID")
+    apply_parser.add_argument("--dataset", "--dataset_id", dest="dataset", required=True, help="BigQuery Dataset ID")
+    apply_parser.add_argument("--table", "--table_id", dest="table", required=True, help="BigQuery Table ID")
     apply_parser.add_argument("--yes", action="store_true", help="Apply updates without confirmation")
     
     args = parser.parse_args()
