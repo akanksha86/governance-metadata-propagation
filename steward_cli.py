@@ -9,8 +9,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'agent/p
 
 try:
     from lineage_plugin import LineagePlugin
+    from glossary_plugin import GlossaryPlugin
 except ImportError:
-    print("Error: Could not import LineagePlugin. Ensure you are running from the project root.")
+    print("Error: Could not import Plugins. Ensure you are running from the project root.")
     sys.exit(1)
 
 def main():
@@ -28,11 +29,15 @@ def main():
     apply_parser = subparsers.add_parser("apply", help="Preview and apply propagation for a table")
     apply_parser.add_argument("--dataset", "--dataset_id", dest="dataset", required=True, help="BigQuery Dataset ID")
     apply_parser.add_argument("--table", "--table_id", dest="table", required=True, help="BigQuery Table ID")
-    apply_parser.add_argument("--yes", action="store_true", help="Apply updates without confirmation")
+    # Glossary recommend command
+    glossary_parser = subparsers.add_parser("glossary-recommend", help="Recommend glossary terms for a table")
+    glossary_parser.add_argument("--dataset", "--dataset_id", dest="dataset", required=True, help="BigQuery Dataset ID")
+    glossary_parser.add_argument("--table", "--table_id", dest="table", required=True, help="BigQuery Table ID")
     
     args = parser.parse_args()
     
     plugin = LineagePlugin(args.project, args.location)
+    glossary_plugin = GlossaryPlugin(args.project, args.location)
     
     if args.command == "scan":
         print(f"Scanning dataset '{args.dataset}' in project '{args.project}'...")
@@ -75,6 +80,17 @@ def main():
             print("Successfully updated metadata in BigQuery.")
         else:
             print("Operation cancelled.")
+            
+    elif args.command == "glossary-recommend":
+        print(f"Fetching glossary recommendations for '{args.dataset}.{args.table}'...")
+        df = glossary_plugin.recommend_terms_for_table(args.dataset, args.table)
+        
+        if df.empty:
+            print("No recommendations found.")
+        else:
+            print("\nGlossary Term Recommendations:")
+            print(df[["Column", "Suggested Term", "Confidence", "Rationale"]].to_string(index=False))
+            print("\nNote: Use the UI or a separate apply command to persist these mappings.")
     else:
         parser.print_help()
 

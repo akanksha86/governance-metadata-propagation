@@ -31,6 +31,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../agen
 
 # Import Agent Components
 from lineage_plugin import LineagePlugin
+from glossary_plugin import GlossaryPlugin
 from context import set_oauth_token
 
 # Configure Logging
@@ -58,12 +59,37 @@ def scan_dataset(project_id, location, dataset_id, request: gr.Request = None):
     token = get_token_from_session(request)
     set_oauth_token(token)
     try:
-        plugin = get_plugin(project_id, location)
-        df = plugin.scan_for_missing_descriptions(dataset_id)
-        if df.empty:
-            gr.Info("No missing descriptions found!")
-            return pd.DataFrame(columns=["Table", "Column", "Type"])
-        return df
+        lineage_plugin = get_plugin(project_id, location)
+        glossary_plugin = GlossaryPlugin(project_id, location)
+        
+        # 1. Scan for missing technical descriptions
+        desc_df = lineage_plugin.scan_for_missing_descriptions(dataset_id)
+        
+        # 2. Scan for missing glossary terms
+        glossary_df = glossary_plugin.scan_for_missing_glossary_terms(dataset_id)
+        
+        # 3. Aggregate by Table for a cleaner UI
+        desc_agg = desc_df.groupby('Table').size().reset_index(name='Missing Descriptions') if not desc_df.empty else pd.DataFrame(columns=['Table', 'Missing Descriptions'])
+        gloss_agg = glossary_df.groupby('Table').size().reset_index(name='Missing Glossary Mappings') if not glossary_df.empty else pd.DataFrame(columns=['Table', 'Missing Glossary Mappings'])
+        
+        # 4. Generate Natural Language Summary
+        desc_count = len(desc_df)
+        gloss_count = len(glossary_df)
+        
+        if desc_count == 0 and gloss_count == 0:
+            summary = "✅ **Metadata Estate is Complete!** All objects have both technical descriptions and business glossary mappings."
+        else:
+            summary = f"### 📊 Governance Gap Analysis\n"
+            summary += f"We found **{desc_count}** column gaps in technical descriptions and **{gloss_count}** column gaps in business glossary mappings.\n\n"
+            
+            if not desc_agg.empty:
+                summary += f"🔍 **Technical Gaps**: {len(desc_agg)} objects affected.\n"
+            if not gloss_agg.empty:
+                summary += f"📖 **Business Gaps**: {len(gloss_agg)} objects affected.\n"
+            
+            summary += "\n*Detailed column recommendations are available in the 'Lineage Propagation' and 'Glossary Recommendations' tabs.*"
+
+        return summary, desc_agg, gloss_agg
     except Exception as e:
         logger.error(f"Scan failed: {e}")
         raise gr.Error(f"Scan failed: {str(e)}")
@@ -86,6 +112,23 @@ def analyze_and_preview(project_id, location, dataset_id, target_table, request:
         return summary, df
     except Exception as e:
         logger.error(f"Analyze & Preview failed: {e}")
+        raise gr.Error(f"Operation failed: {str(e)}")
+
+def get_glossary_recommendations(project_id, location, dataset_id, table_id, request: gr.Request = None):
+    token = get_token_from_session(request)
+    set_oauth_token(token)
+    try:
+        plugin = GlossaryPlugin(project_id, location)
+        df = plugin.recommend_terms_for_table(dataset_id, table_id)
+        if df.empty:
+            gr.Info(f"No glossary recommendations found for {table_id}.")
+            return pd.DataFrame(columns=["Select", "Column", "Suggested Term", "Confidence", "Rationale", "Term ID"])
+        
+        # Add selection column
+        df.insert(0, "Select", True)
+        return df
+    except Exception as e:
+        logger.error(f"Glossary recommendations failed: {e}")
         raise gr.Error(f"Operation failed: {str(e)}")
 
 def apply_propagation_improved(project_id, location, dataset_id, target_table, candidates_df, request: gr.Request = None):
@@ -113,6 +156,34 @@ def apply_propagation_improved(project_id, location, dataset_id, target_table, c
         return f"Successfully applied {len(updates)} updates to {target_table}!"
     except Exception as e:
         logger.error(f"Apply failed: {e}")
+        raise gr.Error(f"Apply failed: {str(e)}")
+
+def apply_glossary_selections(project_id, location, dataset_id, table_id, reco_df, request: gr.Request = None):
+    token = get_token_from_session(request)
+    set_oauth_token(token)
+    try:
+        if reco_df is None or reco_df.empty:
+            raise gr.Error("No recommendations to apply.")
+        
+        # Filter selected rows
+        selected = reco_df[reco_df["Select"] == True]
+        if selected.empty:
+            gr.Warning("No terms selected for application.")
+            return "No terms selected."
+
+        plugin = GlossaryPlugin(project_id, location)
+        updates = []
+        for _, row in selected.iterrows():
+            updates.append({
+                "column": row['Column'],
+                "term_id": row['Term ID'],
+                "term_display": row['Suggested Term']
+            })
+        
+        plugin.apply_terms(dataset_id, table_id, updates)
+        return f"Successfully applied {len(updates)} glossary terms to {table_id} in Dataplex!"
+    except Exception as e:
+        logger.error(f"Glossary apply failed: {e}")
         raise gr.Error(f"Apply failed: {str(e)}")
 
 def check_auth_status(request: gr.Request):
@@ -172,16 +243,26 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
             with gr.Row():
                 scan_btn = gr.Button("Scan Dataset", variant="secondary")
             
-            dash_output = gr.Dataframe(
-                label="Columns Missing Descriptions",
-                interactive=False,
-                wrap=True
-            )
+            dash_summary = gr.Markdown("Click 'Scan Dataset' to analyze metadata completeness.")
+            
+            with gr.Row():
+                with gr.Column():
+                    desc_output = gr.Dataframe(
+                        label="❌ Missing Technical Descriptions",
+                        interactive=False,
+                        wrap=True
+                    )
+                with gr.Column():
+                    glossary_gap_output = gr.Dataframe(
+                        label="❌ Missing Glossary Mappings",
+                        interactive=False,
+                        wrap=True
+                    )
             
             scan_btn.click(
                 scan_dataset, 
                 inputs=[config_project, config_location, global_dataset], 
-                outputs=dash_output
+                outputs=[dash_summary, desc_output, glossary_gap_output]
             )
 
         with gr.TabItem("Lineage Propagation"):
@@ -213,6 +294,38 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
                 apply_propagation_improved, 
                 inputs=[config_project, config_location, global_dataset, prop_table, preview_output], 
                 outputs=apply_result
+            )
+
+        with gr.TabItem("Glossary Recommendations"):
+            gr.Markdown("## 📖 Business Glossary Mapping")
+            gr.Markdown("Recommends mappings of columns to business glossary terms across tables.")
+            
+            with gr.Row():
+                glossary_table = gr.Textbox(label="Target Table", value="customers")
+            
+            recommend_btn = gr.Button("Get Glossary Recommendations", variant="primary")
+            
+            recommendations_view = gr.Dataframe(
+                label="Glossary Recommendations (Select to apply)",
+                interactive=True,
+                wrap=True
+            )
+            
+            with gr.Row():
+                apply_glossary_btn = gr.Button("Apply Selected Terms to Dataplex", variant="primary")
+            
+            glossary_apply_result = gr.Textbox(label="Apply Status", interactive=False)
+            
+            recommend_btn.click(
+                get_glossary_recommendations,
+                inputs=[config_project, config_location, global_dataset, glossary_table],
+                outputs=recommendations_view
+            )
+            
+            apply_glossary_btn.click(
+                apply_glossary_selections,
+                inputs=[config_project, config_location, global_dataset, glossary_table, recommendations_view],
+                outputs=glossary_apply_result
             )
 
     # Auth logic: Show info on load if already logged in

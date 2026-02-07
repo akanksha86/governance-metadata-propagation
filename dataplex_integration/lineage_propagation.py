@@ -120,7 +120,7 @@ class TransformationEnricher:
         if "SAFE." in expr_upper:
             return " (Safe execution applied)"
             
-        return f" (Calculated via logic: `{expr}`)"
+        return f" (Calculated using: `{expr}`)"
 
     @staticmethod
     def enrich_description(target_col: str, source_col: str, original_desc: str, sql_hints: List[str] = None) -> str:
@@ -145,12 +145,9 @@ class TransformationEnricher:
             else:
                 description = explanation
 
-        # Add source context if significantly different
-        if target_col.lower() != source_col.lower():
-            if description:
-                description += f" (Mapped from `{source_col}`)"
-            else:
-                description = f"Propagated from `{source_col}`"
+        # Add source context if significantly different - REMOVED AS PER USER REQUEST
+        # The source is already tracked in separate columns
+        pass
             
         # Add SQL logic context from all hops
         if sql_hints:
