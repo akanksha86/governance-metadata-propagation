@@ -1,5 +1,4 @@
 import re
-import math
 from typing import List, Dict, Any, Optional
 import logging
 
@@ -13,9 +12,9 @@ class SimilarityEngine:
     def __init__(self, project_id: Optional[str] = None, location: str = "us-central1", credentials: Optional[Any] = None):
         # weights for different signals
         self.weights = {
-            "lexical": 0.3,    # Reduced as semantic becomes more powerful
-            "semantic": 0.5,   # Increased and powered by embeddings
-            "lineage": 0.2
+            "lexical": 0.3,    # Matches on string tokens (names, IDs)
+            "semantic": 0.5,   # Matches on vector embeddings (meanings)
+            "lineage": 0.2     # Boost based on upstream associations
         }
         self.project_id = project_id
         self.embedder = VertexAIEmbedder(project_id, location, credentials=credentials) if project_id else None
@@ -36,23 +35,43 @@ class SimilarityEngine:
     def _get_primary_entity(self, text: str) -> Optional[str]:
         """Extracts the primary business entity from text."""
         # Main entities (conflict-prone)
-        entities = ["customer", "order", "transaction", "product", "item", "user", "account", "membership", "loyalty"]
-        # Concept tags (compatibility-prone)
-        concepts = ["amount", "price", "date", "timestamp", "time", "status", "type", "category"]
+        entities = ["customer", "order", "item", "product", "transaction", "user", "account", "membership", "loyalty"]
+        # Abbreviations/Aliases
+        aliases = {"cust": "customer", "prod": "product", "txn": "transaction", "trans": "transaction", "acc": "account"}
         
         text_norm = self._normalize(text)
         tokens = text_norm.split()
         
-        # Check entities first
+        # Check aliases first
+        for alias, entity in aliases.items():
+            if alias in tokens:
+                return entity
+
+        # Check entities
         for entity in entities:
             if entity in tokens:
                 return entity
-        
-        # Check concepts
-        for concept in concepts:
-            if concept in tokens:
-                return concept
                 
+        return None
+
+    def _get_concept(self, text: str) -> Optional[str]:
+        """Identifies the technical or business concept (ID, Amount, Timestamp, etc.)."""
+        # Concept maps
+        concept_map = {
+            "id": ["id", "identifier", "pk", "fk", "key", "code", "sku"],
+            "amount": ["amount", "price", "total", "sum", "cost", "value", "subtotal", "tax", "discount"],
+            "timestamp": ["timestamp", "date", "time", "ts", "added", "at", "created", "updated"],
+            "category": ["category", "group", "type", "class", "genre", "level"]
+        }
+        
+        text_norm = self._normalize(text)
+        tokens = text_norm.split()
+        
+        for concept, keywords in concept_map.items():
+            for kw in keywords:
+                if kw in tokens:
+                    return concept
+        
         return None
 
     def _detect_entity_conflict(self, col_name: str, term_display: str, term_id: str) -> bool:
@@ -128,12 +147,6 @@ class SimilarityEngine:
         
         return min(score, 1.0)
 
-    def calculate_lineage_proximity(self, col_lineage: Dict[str, Any], term_mappings: List[Dict[str, Any]]) -> float:
-        """
-        Boost score if upstream columns are already mapped to this term.
-        """
-        # Placeholder logic:
-        return 0.0
 
     def get_ranked_suggestions(self, column: Dict[str, Any], all_terms: List[Dict[str, Any]], col_embedding: Optional[List[float]] = None) -> List[Dict[str, Any]]:
         """Produces ranked suggestions for a single column with adaptive filtering and entity awareness."""
@@ -153,10 +166,10 @@ class SimilarityEngine:
             score = (lexical * self.weights['lexical']) + (semantic * self.weights['semantic'])
             
             orig_score = score
-            # 1. Entity Conflict Penalty
+            # 1. Entity Conflict Penalty: Prevent 'customer_id' matching 'order_id'
             conflict = self._detect_entity_conflict(col_name, term_display, term_id_base)
             if conflict:
-                score -= 0.30 # Increased penalty to be more decisive
+                score -= 0.30 # Strong penalty to suppress irrelevant matches
             
             # 2. Entity Match Boost
             term_entity = self._get_primary_entity(term_display) or self._get_primary_entity(term_id_base)
@@ -166,14 +179,23 @@ class SimilarityEngine:
                 score += boost
                 
             # 3. Concept Alignment: If both are IDs or both are Amounts, they should be closer
-            if not conflict:
-                # If they share a concept tag (like 'amount' or 'id')
-                col_tags = set(self._normalize(col_name).split())
-                term_tags = set(self._normalize(term_display).split()).union(set(self._normalize(term_id_base).split()))
-                for tag in ["id", "amount", "price", "date", "timestamp"]:
-                    if tag in col_tags and tag in term_tags:
-                        score += 0.1 # Concept match boost
-                        break
+            col_concept = self._get_concept(col_name)
+            term_concept = self._get_concept(term_display) or self._get_concept(term_id_base)
+            
+            if col_concept and term_concept:
+                if col_concept == term_concept:
+                    boost = 0.1
+                    score += boost
+                else:
+                    # CONCEPT MISMATCH: If one is ID and other is Timestamp, apply heavy penalty
+                    # even if the entity (e.g. 'transaction') matches.
+                    score -= 0.35 # Strong penalty for conceptual mismatch
+            
+            # 4. Exact Word Match Boost (e.g. 'amount' matching 'Amount' exactly)
+            col_words = set(self._normalize(col_name).split())
+            term_words = set(self._normalize(term_display).split())
+            if col_words.intersection(term_words):
+                score += 0.05
 
             # 4. Base Thresholding
             if score >= 0.30:
@@ -196,7 +218,8 @@ class SimilarityEngine:
         if suggestions:
             top_score = suggestions[0]['confidence']
             if top_score > 0.45:
-                # Keep suggestions within 70% of top score if top score is strong
+                # Keep suggestions within 70% of the top score if the leader is strong.
+                # This prevents "noise" when one term is clearly the best match.
                 suggestions = [s for s in suggestions if s['confidence'] >= (top_score * 0.7)]
         
         return suggestions[:5] # Top 5 relevant matches

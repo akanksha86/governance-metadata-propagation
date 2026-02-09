@@ -7,7 +7,7 @@ import os
 from google.cloud import bigquery
 from google.cloud import dataplex_v1
 from lineage_propagation import LineageGraphTraverser, DerivationIdentifier
-from knowledge_engine import DescriptionPropagator
+from dataset_insights import DescriptionPropagator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -112,7 +112,7 @@ def propagate_pull(project_id, dataset_id, target_table, lineage_traverser, desc
                         "desc": src_desc
                     })
         
-        # Knowledge Engine fallback
+        # Dataset Insights fallback
         if not candidates:
             known_relationships = description_propagator.knowledge_json.get("relationships", [])
             for rel in known_relationships:
@@ -125,7 +125,7 @@ def propagate_pull(project_id, dataset_id, target_table, lineage_traverser, desc
                                 "source_col": mapping.get("source_col"),
                                 "confidence": mapping.get("confidence"),
                                 "type": mapping.get("type"),
-                                "desc": "Propagated via Knowledge Engine: " + mapping.get("explanation", "")
+                                "desc": "Propagated via Dataset Insights: " + mapping.get("explanation", "")
                             })
 
         if candidates:
@@ -227,7 +227,7 @@ def main():
     parser.add_argument("--source_table", help="Push Mode: Propagate FROM this table")
     parser.add_argument("--entity_table", help="Chain Mode: Propagate TO this table, then FROM this table (Upstream -> Entity -> Downstream)")
     parser.add_argument("--mode", choices=["report", "apply"], default="report")
-    parser.add_argument("--knowledge_json", help="Path to Knowledge Engine JSON")
+    parser.add_argument("--knowledge_json", help="Path to Dataset Insights JSON")
     
     args = parser.parse_args()
     
@@ -238,9 +238,9 @@ def main():
     # Initialize components
     lineage_traverser = LineageGraphTraverser(args.project_id, "europe-west1")
     
-    # Load knowledge insights if provided (Enriching the Lineage Graph)
+    # Load insights if provided (Enriching the Lineage Graph)
     if args.knowledge_json:
-        logger.info(f"Loading Knowledge Engine insights from {args.knowledge_json}")
+        logger.info(f"Loading Dataset Insights from {args.knowledge_json}")
         lineage_traverser.load_knowledge_insights(args.knowledge_json)
         
     description_propagator = DescriptionPropagator(args.knowledge_json)

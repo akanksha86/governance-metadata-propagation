@@ -43,7 +43,7 @@ DEFAULT_PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "governance-agent")
 DEFAULT_LOCATION = "europe-west1"
 DEFAULT_DATASET_ID = "retail_syn_data"
 
-KNOWLEDGE_JSON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../dataplex_integration/knowledge_engine_sample.json"))
+KNOWLEDGE_JSON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../dataplex_integration/dataset_insights_sample.json"))
 
 def get_plugin(project_id, location):
     # For demo efficiency, we can cache the plugin instance per project/location
@@ -321,6 +321,8 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
             deselect_all_lineage_btn.click(deselect_all_lineage, inputs=[preview_output], outputs=[preview_output])
             
             preview_btn.click(
+                lambda: "", outputs=[apply_result]
+            ).then(
                 analyze_and_preview, 
                 inputs=[config_project, config_location, global_dataset, prop_table], 
                 outputs=[summary_output, preview_output]
@@ -360,6 +362,8 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
             deselect_all_glossary_btn.click(deselect_all_glossary, inputs=[recommendations_view], outputs=[recommendations_view])
             
             recommend_btn.click(
+                lambda: "", outputs=[glossary_apply_result]
+            ).then(
                 get_glossary_recommendations,
                 inputs=[config_project, config_location, global_dataset, glossary_table],
                 outputs=recommendations_view

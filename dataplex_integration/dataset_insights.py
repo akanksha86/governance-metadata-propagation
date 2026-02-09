@@ -13,7 +13,7 @@ LOCATION = "europe-west1"
 DATASET_ID = "retail_syn_data"
 
 class DescriptionPropagator:
-    """Helper class to load and serve Knowledge Engine insights."""
+    """Helper class to load and serve Dataset Insights."""
     def __init__(self, json_path=None):
         self.json_path = json_path
         self.knowledge_json = {}

@@ -1,54 +1,60 @@
 import logging
 import numpy as np
 from typing import List, Optional, Any
-from google.cloud import aiplatform
-from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
+from google import genai
+from google.genai import types
 
 logger = logging.getLogger(__name__)
 
 class VertexAIEmbedder:
     """
-    Utility to generate and compare embeddings using Vertex AI.
+    Utility to generate and compare embeddings using Google Gen AI SDK.
     """
     def __init__(self, project_id: str, location: str = "us-central1", model_name: str = "text-embedding-004", credentials: Optional[Any] = None):
         """
-        Initializes the Vertex AI SDK and the embedding model.
-        NOTE: Model availability may vary by region. Defaults to us-central1 for higher availability of latest models.
+        Initializes the Google Gen AI Client.
         """
         self.project_id = project_id
         self.location = location
         self.model_name = model_name
-        self._model = None
-        
-        try:
-            aiplatform.init(project=project_id, location=location, credentials=credentials)
-        except Exception as e:
-            logger.error(f"Failed to initialize Vertex AI: {e}")
+        self._client = None
+        self._credentials = credentials
 
-    def _get_model(self):
-        if self._model is None:
+    def _get_client(self):
+        if self._client is None:
             try:
-                self._model = TextEmbeddingModel.from_pretrained(self.model_name)
+                # Use vertex_ai=True to ensure we use the Vertex AI backed API
+                self._client = genai.Client(
+                    project=self.project_id,
+                    location=self.location,
+                    credentials=self._credentials,
+                    vertexai=True
+                )
             except Exception as e:
-                logger.error(f"Failed to load Vertex AI model {self.model_name}: {e}")
-        return self._model
+                logger.error(f"Failed to initialize Google Gen AI Client: {e}")
+        return self._client
 
     def get_embeddings(self, texts: List[str], task_type: str = "RETRIEVAL_DOCUMENT") -> List[List[float]]:
         """
         Generates embeddings for a list of texts in batch.
         """
-        model = self._get_model()
-        if not model or not texts:
+        client = self._get_client()
+        if not client or not texts:
             return []
             
         try:
-            inputs = [TextEmbeddingInput(text=t, task_type=task_type) for t in texts]
-            # Vertex AI SDK handles batching internally if the list is large, 
-            # but we can also manage it if needed (limit is usually 250 per request).
-            embeddings = model.get_embeddings(inputs)
-            return [e.values for e in embeddings]
+            # google-genai SDK handles batching via the contents list
+            response = client.models.embed_content(
+                model=self.model_name,
+                contents=texts,
+                config=types.EmbedContentConfig(
+                    task_type=task_type
+                )
+            )
+            # The response contains a list of embeddings
+            return [e.values for e in response.embeddings]
         except Exception as e:
-            logger.error(f"Error generating embeddings: {e}")
+            logger.error(f"Error generating embeddings with Google Gen AI SDK: {e}")
             return []
 
     def get_embedding(self, text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> Optional[List[float]]:
