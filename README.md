@@ -7,8 +7,13 @@ This project demonstrates an agentic data governance solution using Google Cloud
 The solution focuses on:
 1.  **Synthetic Data Generation**: Creating complex retail data with built-in lineage relationships (e.g., `raw_transactions` -> `transactions`).
 2.  **Dataset & Table Insights**: Automating Data Documentation scans to generate column-level descriptions and dataset-level entity relationships.
-3.  **Agentic Data Steward**: A Gradio-based application for data stewards to scan, analyze, and propagate metadata globally.
-4.  **Multi-Hop Lineage Propagation**: Propagates metadata across multiple transformation steps, even through undocumented intermediate tables or views.
+3.  **Agentic Data Steward**: A Gradio-based application for data stewards to monitor metadata health and bridge gaps.
+4.  **Phase 3 & 4 Enhancements**:
+    - **Vertex AI Semantic Similarity**: Uses `text-embedding-004` for high-precision glossary recommendations.
+    - **Business Glossary Propagation**: AI-assisted mapping of technical columns to business terms.
+    - **Dataplex-Exclusive Persistence**: Keeps BQ technical descriptions clean while using Dataplex as the source of truth for business mappings.
+    - **Governance Dashboard**: Multi-dimensional scan for technical (descriptions) and business (glossary) gaps.
+5.  **Multi-Hop Lineage Propagation**: Propagates metadata across multiple transformation steps, even through undocumented intermediate tables or views.
 - **SQL-Based Logic Enrichment**: Extracts actual BigQuery SQL transformations to generate human-readable descriptions for computed columns.
 - **Gradio User Interface**: A streamlined UI for data stewards to scan, preview, and apply metadata changes.
 - **Steward CLI**: Command-line interface for headless scanning and propagation.
@@ -50,6 +55,7 @@ python steward_cli.py apply --dataset retail_syn_data --table transactions
     *   BigQuery API (`bigquery.googleapis.com`)
     *   Data Catalog API (`datacatalog.googleapis.com`)
     *   Data Lineage API (`datalineage.googleapis.com`)
+    *   Vertex AI API (`aiplatform.googleapis.com`)
 *   Python 3.8+
 
 ## Setup

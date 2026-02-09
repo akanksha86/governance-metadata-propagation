@@ -29,13 +29,34 @@ class GlossaryPlugin(BasePlugin):
         if not self._glossary_client:
             self._glossary_client = GlossaryClient(self.project_id, self.location, credentials=creds)
         if not self._similarity_engine:
-            self._similarity_engine = SimilarityEngine()
+            # Vertex AI models are best supported in us-central1 for now
+            self._similarity_engine = SimilarityEngine(self.project_id, location="us-central1", credentials=creds)
         if not self._bq_client:
             self._bq_client = bigquery.Client(project=self.project_id, credentials=creds)
 
+    def _cache_term_embeddings(self, all_terms: List[Dict[str, Any]]):
+        """Pre-calculates and caches embeddings for all glossary terms."""
+        if not self._similarity_engine.embedder:
+            return
+
+        texts_to_embed = []
+        term_ids = []
+        for term in all_terms:
+            if term['name'] not in self._similarity_engine.term_embeddings:
+                # Combine name and description for a richer semantic representation
+                text = f"{term['display_name']}: {term.get('description', '')}"
+                texts_to_embed.append(text)
+                term_ids.append(term['name'])
+        
+        if texts_to_embed:
+            logger.info(f"Generating embeddings for {len(texts_to_embed)} glossary terms...")
+            embs = self._similarity_engine.embedder.get_embeddings(texts_to_embed)
+            new_cache = {term_ids[i]: embs[i] for i in range(len(embs))}
+            self._similarity_engine.term_embeddings.update(new_cache)
+
     def recommend_terms_for_table(self, dataset_id: str, table_id: str) -> pd.DataFrame:
         """
-        Fetches recommendations for all columns in a table.
+        Fetches recommendations for all columns in a table using Vertex AI Embeddings.
         """
         self._ensure_initialized()
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
@@ -46,19 +67,36 @@ class GlossaryPlugin(BasePlugin):
             logger.warning("No glossary terms found to recommend.")
             return pd.DataFrame()
 
-        recommendations = []
+        # 1. Warm up Term Cache
+        self._cache_term_embeddings(all_terms)
+
+        # 2. Batch Generate Column Embeddings
+        col_metas = []
+        col_texts = []
         for field in table.schema:
-            col_meta = {
+            meta = {
                 "name": field.name,
                 "description": field.description or "",
                 "type": field.field_type
             }
-            
-            suggestions = self._similarity_engine.get_ranked_suggestions(col_meta, all_terms)
+            col_metas.append(meta)
+            # Use name and description for column semantic context
+            col_texts.append(f"{field.name}: {field.description or ''}")
+
+        col_embeddings = []
+        if self._similarity_engine.embedder:
+            logger.info(f"Generating batch embeddings for {len(col_texts)} columns in {table_id}...")
+            col_embeddings = self._similarity_engine.embedder.get_embeddings(col_texts, task_type="RETRIEVAL_QUERY")
+
+        # 3. Get Recommendations
+        recommendations = []
+        for i, col_meta in enumerate(col_metas):
+            col_emb = col_embeddings[i] if i < len(col_embeddings) else None
+            suggestions = self._similarity_engine.get_ranked_suggestions(col_meta, all_terms, col_embedding=col_emb)
             
             for sug in suggestions:
                 recommendations.append({
-                    "Column": field.name,
+                    "Column": col_meta['name'],
                     "Suggested Term": sug['display_name'],
                     "Confidence": sug['confidence'],
                     "Rationale": f"Lexical: {sug['signals']['lexical']}, Semantic: {sug['signals']['semantic']}",
@@ -72,130 +110,163 @@ class GlossaryPlugin(BasePlugin):
         # Harvested entries are in the @bigquery group at the same location as the BQ dataset
         return f"projects/{self.project_id}/locations/{self.location}/entryGroups/@bigquery/entries/{entry_id}"
 
-    def _ensure_aspect_type(self) -> str:
-        """Ensures the glossary-mapping aspect type exists at the entry level."""
+    def _resolve_term_entry_name(self, term_resource_name: str) -> Optional[str]:
+        """Maps a Business Glossary term resource name to its Dataplex Catalog Entry name."""
         client = dataplex_v1.CatalogServiceClient(credentials=get_credentials(self.project_id))
-        parent = f"projects/{self.project_id}/locations/{self.location}"
-        aspect_id = "glossary-mapping"
-        aspect_name = f"{parent}/aspectTypes/{aspect_id}"
         
+        # Pattern 1: Search (sometimes fails with 501/404)
+        parent = f"projects/{self.project_id}/locations/{self.location}"
+        query = f'resource:"{term_resource_name}"'
         try:
-            client.get_aspect_type(name=aspect_name)
-            return aspect_name
+            request = dataplex_v1.SearchEntriesRequest(query=query)
+            results = client.search_entries(request=request)
+            for res in results:
+                if "glossaries" in res.entry_source.resource:
+                    return res.entry_name
+        except Exception as e:
+            logger.warning(f"Search failed for glossary term resolution: {e}")
+
+        # Pattern 2: Direct Construction with Project ID
+        # Format: projects/{id}/locations/{loc}/entryGroups/@dataplex/entries/{resource}
+        group_prefix = f"projects/{self.project_id}/locations/{self.location}/entryGroups/@dataplex/entries"
+        candidate_id = f"{group_prefix}/{term_resource_name}"
+        try:
+            client.get_entry(name=candidate_id)
+            return candidate_id
         except Exception:
-            aspect_type = dataplex_v1.AspectType()
-            aspect_type.description = "Entry-level Business Glossary Mappings"
-            template = dataplex_v1.AspectType.MetadataTemplate()
-            template.name = "mappings"
-            template.type = "RECORD"
-            
-            field = dataplex_v1.AspectType.MetadataTemplate()
-            field.name = "data_json"
-            field.type = "STRING"
-            field.index = 1
-            
-            template.record_fields.extend([field])
-            aspect_type.metadata_template = template
-            
-            op = client.create_aspect_type(parent=parent, aspect_type_id=aspect_id, aspect_type=aspect_type)
-            op.result()
-            return aspect_name
+            pass
+
+        # Pattern 3: Direct Construction with Project Number (Harvested format)
+        project_number = "1095607222622" # Hint for this specific demo environment
+        term_res_num = term_resource_name.replace(self.project_id, project_number)
+        candidate_num = f"{group_prefix}/{term_res_num}"
+        try:
+            client.get_entry(name=candidate_num)
+            return candidate_num
+        except Exception:
+            pass
+
+        logger.error(f"Could not resolve glossary term to Catalog Entry: {term_resource_name}")
+        return None
 
     def apply_terms(self, dataset_id: str, table_id: str, updates: List[Dict[str, str]]):
         """
-        Applies glossary terms to columns.
+        Applies glossary terms to columns using native Dataplex EntryLinks.
         updates: List of {'column': str, 'term_id': str, 'term_display': str}
         """
         self._ensure_initialized()
-        
-        # 1. Update BigQuery Schema
-        table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
-        table = self._bq_client.get_table(table_ref)
-        schema = list(table.schema)
-        
-        updated_cols = []
-        for up in updates:
-            col_name = up['column']
-            term_display = up['term_display']
-            
-            for i, field in enumerate(schema):
-                if field.name == col_name:
-                    clean_desc = field.description or ""
-                    if "Business Glossary:" in clean_desc:
-                        clean_desc = clean_desc.split("Business Glossary:")[0].strip()
-                    
-                    new_desc = f"{clean_desc}\n\nBusiness Glossary: {term_display}".strip()
-                    schema[i] = bigquery.SchemaField(
-                        name=field.name, field_type=field.field_type,
-                        mode=field.mode, description=new_desc, fields=field.fields
-                    )
-                    updated_cols.append(col_name)
-                    break
-        
-        table.schema = schema
-        try:
-            self._bq_client.update_table(table, ["schema"])
-            logger.info(f"Updated BQ descriptions for {len(updated_cols)} columns.")
-        except Exception as e:
-            logger.error(f"Failed to update BQ table: {e}")
-            raise
-
-        # 2. Update Dataplex Entry Aspect (Entry-level rollup)
-        import json
-        from google.protobuf import struct_pb2
         client = dataplex_v1.CatalogServiceClient(credentials=get_credentials(self.project_id))
-        entry_name = self._get_entry_name(dataset_id, table_id)
-        aspect_type_name = self._ensure_aspect_type()
         
-        try:
-            # Map of column -> term_display for storage
-            mapping_data = {up['column']: up['term_display'] for up in updates}
+        # 1. BigQuery update (Optional/Skipped as per previous preference)
+        logger.info(f"Applying {len(updates)} glossary terms to {table_id} via native EntryLinks.")
+
+        # EntryLinks for BigQuery entries MUST reside in the @bigquery EntryGroup
+        parent_group = f"projects/{self.project_id}/locations/{self.location}/entryGroups/@bigquery"
+        entry_name = self._get_entry_name(dataset_id, table_id)
+        
+        # Link Type for Glossary Definition
+        link_type = "projects/dataplex-types/locations/global/entryLinkTypes/definition"
+
+        for up in updates:
+            column = up['column']
+            term_resource_name = up['term_id']  # This is the Business Glossary resource name
             
-            # Fetch existing entry to preserve other aspects
-            entry = client.get_entry(name=entry_name)
-            aspects = dict(entry.aspects)
+            # Resolve to Catalog Entry Name
+            term_entry_name = self._resolve_term_entry_name(term_resource_name)
+            if not term_entry_name:
+                logger.error(f"Skipping {column}: Could not resolve glossary term to Catalog Entry.")
+                continue
+
+            # Deterministic ID for idempotency: link_{table}_{column}
+            # EntryLink IDs must be lowercase, alphanumeric/hyphens
+            clean_column = column.replace("_", "-").lower()
+            clean_table = table_id.replace("_", "-").lower()
+            entry_link_id = f"link-{clean_table}-{clean_column}"
             
-            aspect_key = f"{self.project_id}.{self.location}.glossary-mapping"
-            
-            data = struct_pb2.Struct()
-            data.update({"data_json": json.dumps(mapping_data)})
-            
-            aspects[aspect_key] = dataplex_v1.Aspect(
-                aspect_type=aspect_type_name,
-                data=data
-            )
-            
-            new_entry = dataplex_v1.Entry()
-            new_entry.name = entry_name
-            new_entry.aspects = aspects
-            client.update_entry(entry=new_entry, update_mask={"paths": ["aspects"]})
-            logger.info(f"Updated Dataplex glossary-mapping aspect for {table_id}.")
-        except Exception as e:
-            logger.error(f"Failed to update Dataplex entry aspect: {e}")
-            raise
+            try:
+                # Create the EntryLink
+                link = dataplex_v1.EntryLink()
+                link.entry_link_type = link_type
+                
+                # Source: The Table Column
+                source_ref = dataplex_v1.EntryLink.EntryReference()
+                source_ref.name = entry_name
+                source_ref.path = f"Schema.{column}"
+                source_ref.type_ = dataplex_v1.EntryLink.EntryReference.Type.SOURCE
+                
+                # Target: The Glossary Term
+                target_ref = dataplex_v1.EntryLink.EntryReference()
+                target_ref.name = term_entry_name
+                target_ref.type_ = dataplex_v1.EntryLink.EntryReference.Type.TARGET
+                
+                link.entry_references = [source_ref, target_ref]
+                
+                try:
+                    # Create in @bigquery group
+                    client.create_entry_link(parent=parent_group, entry_link_id=entry_link_id, entry_link=link)
+                    logger.info(f"Created native link for {column} -> {up['term_display']} in @bigquery group")
+                except Exception as e:
+                    if "already exists" in str(e).lower():
+                        logger.info(f"Link for {column} already exists, skipping.")
+                    else:
+                        raise e
+
+            except Exception as e:
+                logger.error(f"Failed to create EntryLink for {column}: {e}")
+                # We continue with other updates even if one fails
+                continue
 
     def scan_for_missing_glossary_terms(self, dataset_id: str) -> pd.DataFrame:
         """
-        Scans all tables in a dataset for columns missing glossary terms.
+        Scans all tables in a dataset for columns missing glossary terms using native EntryLinks.
         """
         self._ensure_initialized()
+        client = dataplex_v1.CatalogServiceClient(credentials=get_credentials(self.project_id))
+        
+        parent = f"projects/{self.project_id}/locations/{self.location}"
+        # Links for BigQuery entries are in the @bigquery group
+        link_group_name = f"{parent}/entryGroups/@bigquery"
+        
+        # 1. Fetch existing links to build a lookup map
+        # Map: (entry_name, path) -> True
+        existing_links = {}
+        try:
+            # Note: list_entry_links might be paged or filterable, but for simplicity we list all
+            links = client.list_entry_links(parent=link_group_name)
+            for link in links:
+                # We only care about definition links
+                if "definition" not in link.entry_link_type:
+                    continue
+                
+                source_ref = next((r for r in link.entry_references if r.type_ == dataplex_v1.EntryLink.EntryReference.Type.SOURCE), None)
+                if source_ref:
+                    existing_links[(source_ref.name, source_ref.path)] = True
+        except Exception as e:
+            logger.warning(f"Could not list EntryLinks for scan: {e}")
+
         dataset_ref = self._bq_client.dataset(dataset_id)
         tables = self._bq_client.list_tables(dataset_ref)
         
         gaps = []
         for table_item in tables:
+            table_id = table_item.table_id
             full_table = self._bq_client.get_table(table_item.reference)
+            entry_name = self._get_entry_name(dataset_id, table_id)
+            
             for field in full_table.schema:
-                desc = field.description or ""
-                if "Business Glossary:" not in desc:
-                    gaps.append({
-                        "Table": table_item.table_id,
-                        "Column": field.name,
-                        "Type": field.field_type
-                    })
+                path = f"Schema.{field.name}"
+                
+                # Check if link exists
+                if (entry_name, path) not in existing_links:
+                    # Also check legacy BQ description for backward compatibility
+                    desc = field.description or ""
+                    if "Business Glossary:" not in desc:
+                        gaps.append({
+                            "Table": table_id,
+                            "Column": field.name,
+                            "Type": field.field_type
+                        })
         
         return pd.DataFrame(gaps)
 
-    def apply_term_to_column(self, dataset_id: str, table_id: str, column_name: str, term_id: str):
-        # Deprecated
-        pass
+

@@ -14,3 +14,4 @@ fastapi
 uvicorn
 google-cloud-datacatalog-lineage
 google-cloud-datacatalog
+google-cloud-aiplatform
