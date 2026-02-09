@@ -145,7 +145,16 @@ Implements **Table-level** Data Documentation scans.
 python3 dataplex_integration/manage_insights.py
 ```
 
-### 4. Lineage Propagation & Enrichment
+### 4. Business Glossary & Native Integration (Schema Tab)
+**Plugin**: `agent/plugins/glossary_plugin.py`
+
+Maps technical columns to business terms using **Vertex AI Semantic Similarity** and persists them natively in Dataplex.
+*   **Native EntryLinks**: Instead of custom aspects, it creates native `EntryLinks` of type `definition`.
+*   **Dataplex Schema Integration**: This allows business terms to appear directly in the **Schema** tab of the Dataplex UI, providing a first-class experience for data stewards.
+*   **Resilient Placement**: Links are automatically created in the `@bigquery` system entry group to comply with Dataplex's metadata placement rules for BigQuery assets.
+*   **Resolution Helper**: Automatically maps Business Glossary term resource names to their corresponding Catalog Entry names, even when project numbers are used internally by Dataplex.
+
+### 5. Lineage Propagation & Enrichment
 **Script**: `dataplex_integration/propagate_metadata.py`
 
 Propagates metadata (descriptions) from upstream sources to downstream targets.
