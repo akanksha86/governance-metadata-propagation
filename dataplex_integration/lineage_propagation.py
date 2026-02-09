@@ -13,7 +13,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SQLFetcher:
-    """Fetches transformation SQL from BigQuery Information Schema."""
+    """
+    Fetches transformation SQL from BigQuery Information Schema.
+    This allows the propagation engine to understand HOW a column was derived.
+    """
     def __init__(self, project_id: str, location: str, credentials: Optional[Any] = None):
         self.project_id = project_id
         self.location = location
@@ -21,8 +24,10 @@ class SQLFetcher:
 
     def get_transformation_sql(self, dataset_id: str, table_id: str) -> Optional[str]:
         """Queries Information Schema for the last SQL job that updated this table."""
+        # NOTE: BigQuery Information Schema Jobs views are regional.
+        # We must query the specific region where the processing happened.
         region = self.location.split('-')[0] # approximate region mapping
-        if 'europe' in self.location: region = 'europe-west1' # handle europe specific
+        if 'europe' in self.location: region = 'europe-west1' # handle europe specific multi-region/regional variation
         
         query = f"""
         SELECT query
@@ -92,35 +97,36 @@ class TransformationEnricher:
 
         # 1. Type Conversion
         if "CAST(" in expr_upper or "SAFE_CAST(" in expr_upper:
-            return " (Converted data type)"
+            return f", converted to a different format (`{expr}`)"
             
         # 2. Null Handling
         if any(kw in expr_upper for kw in ["COALESCE(", "IFNULL(", "NULLIF("]):
-            return " (Handles missing values)"
+            return f", with null-handling logic (`{expr}`)"
             
         # 3. Numerical Operations
         if any(kw in expr_upper for kw in ["ROUND(", "CEIL(", "FLOOR(", "TRUNC("]):
-            return " (Numerical rounding applied)"
+            return f", rounded using `{expr}`"
+            
         if any(op in expr for op in ["*", "/", "+", "-"]) and any(char.isdigit() for char in expr):
-            return " (Value adjustment applied)"
+            return f", with value adjustment applied (calculated as `{expr}`)"
 
         # 4. String Formatting
         if any(kw in expr_upper for kw in ["UPPER(", "LOWER(", "TRIM(", "CONCAT(", "SUBSTR("]):
-            return " (String formatting applied)"
+            return f", with string transformations (`{expr}`)"
 
         # 5. Date/Time Extractions
         if "EXTRACT(" in expr_upper:
-            return " (Date/Time component extracted)"
+            return f", with temporal component extracted via `{expr}`"
 
         # 6. Logical Branching
         if "CASE" in expr_upper or "IF(" in expr_upper:
-            return " (Conditional logic applied)"
+            return f", determined by conditional logic (`{expr}`)"
 
         # 7. Safe Execution
         if "SAFE." in expr_upper:
-            return " (Safe execution applied)"
+            return f", executed with safe-mode operations (`{expr}`)"
             
-        return f" (Calculated using: `{expr}`)"
+        return f", calculated using: `{expr}`"
 
     @staticmethod
     def enrich_description(target_col: str, source_col: str, original_desc: str, sql_hints: List[str] = None) -> str:
@@ -128,22 +134,21 @@ class TransformationEnricher:
         explanation = ""
         target_lower = target_col.lower()
         
+        # Determine fallback explanation if original_desc is empty
         if any(kw in target_lower for kw in ['amount', 'price', 'cost', 'discount', 'tax']):
-            explanation = "Monetary value of the transaction."
+            explanation = "Monetary value."
         elif any(kw in target_lower for kw in ['date', 'timestamp', 'time']):
-            explanation = "Temporal attribute of the event."
+            explanation = "Temporal attribute."
         elif any(kw in target_lower for kw in ['category', 'type', 'status']):
             explanation = "Classification or status indicator."
 
         # Start with the best available description
-        description = original_desc or ""
+        description = original_desc or explanation or ""
         
-        # If we have an explanation and it's not already in the description, prepend it
-        if explanation and explanation.lower() not in description.lower():
-            if description:
-                description = f"{explanation} {description}"
-            else:
-                description = explanation
+        # Clean up any trailing periods to allow smoother concatenation
+        description = description.strip()
+        if description.endswith('.'):
+            description = description[:-1]
 
         # Add source context if significantly different - REMOVED AS PER USER REQUEST
         # The source is already tracked in separate columns

@@ -43,7 +43,7 @@ DEFAULT_PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "governance-agent")
 DEFAULT_LOCATION = "europe-west1"
 DEFAULT_DATASET_ID = "retail_syn_data"
 
-KNOWLEDGE_JSON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../dataplex_integration/knowledge_engine_sample.json"))
+KNOWLEDGE_JSON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../dataplex_integration/dataset_insights_sample.json"))
 
 def get_plugin(project_id, location):
     # For demo efficiency, we can cache the plugin instance per project/location
@@ -107,8 +107,10 @@ def analyze_and_preview(project_id, location, dataset_id, target_table, request:
         df = plugin.preview_propagation(dataset_id, target_table)
         if df.empty:
             gr.Warning(f"No upstream candidates found for {target_table}.")
-            df = pd.DataFrame(columns=["Target Column", "Source", "Source Column", "Confidence", "Proposed Description", "Type"])
+            return summary, pd.DataFrame(columns=["Select", "Target Column", "Source", "Source Column", "Confidence", "Proposed Description", "Type"])
             
+        # Add selection column
+        df.insert(0, "Select", True)
         return summary, df
     except Exception as e:
         logger.error(f"Analyze & Preview failed: {e}")
@@ -138,9 +140,15 @@ def apply_propagation_improved(project_id, location, dataset_id, target_table, c
         if candidates_df is None or candidates_df.empty:
             raise gr.Error("No candidates to apply.")
         
+        # Filter selected rows
+        selected = candidates_df[candidates_df["Select"] == True]
+        if selected.empty:
+            gr.Warning("No columns selected for application.")
+            return "No columns selected."
+            
         plugin = get_plugin(project_id, location)
         updates = []
-        for _, row in candidates_df.iterrows():
+        for _, row in selected.iterrows():
             if 'Target Column' in row and 'Proposed Description' in row:
                 updates.append({
                     "table": target_table,
@@ -149,8 +157,7 @@ def apply_propagation_improved(project_id, location, dataset_id, target_table, c
                 })
             
         if not updates:
-            gr.Warning("No valid updates selected.")
-            return "No valid updates selection."
+            return "No valid updates found in selection."
 
         plugin.apply_propagation(dataset_id, updates)
         return f"Successfully applied {len(updates)} updates to {target_table}!"
@@ -166,6 +173,8 @@ def apply_glossary_selections(project_id, location, dataset_id, table_id, reco_d
             raise gr.Error("No recommendations to apply.")
         
         # Filter selected rows
+        # Ensure 'Select' column is treated as boolean
+        reco_df["Select"] = reco_df["Select"].astype(bool)
         selected = reco_df[reco_df["Select"] == True]
         if selected.empty:
             gr.Warning("No terms selected for application.")
@@ -185,6 +194,24 @@ def apply_glossary_selections(project_id, location, dataset_id, table_id, reco_d
     except Exception as e:
         logger.error(f"Glossary apply failed: {e}")
         raise gr.Error(f"Apply failed: {str(e)}")
+
+def toggle_all_selection(df, value):
+    """Universal helper to toggle a 'Select' column in a dataframe."""
+    if df is not None and not df.empty:
+        df["Select"] = value
+    return df
+
+def select_all_lineage(df):
+    return toggle_all_selection(df, True)
+
+def deselect_all_lineage(df):
+    return toggle_all_selection(df, False)
+
+def select_all_glossary(df):
+    return toggle_all_selection(df, True)
+
+def deselect_all_glossary(df):
+    return toggle_all_selection(df, False)
 
 def check_auth_status(request: gr.Request):
     if request and "google_token" in request.session:
@@ -277,15 +304,25 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
             preview_output = gr.Dataframe(
                 label="Propagation Candidates (Edit 'Proposed Description' only)", 
                 interactive=True, 
-                wrap=True
+                wrap=True,
+                datatype=["bool", "str", "str", "str", "number", "str", "str"]
             )
+            
+            with gr.Row():
+                select_all_lineage_btn = gr.Button("Select All", size="sm")
+                deselect_all_lineage_btn = gr.Button("Deselect All", size="sm")
             
             with gr.Row():
                 apply_btn = gr.Button("Apply Selection to BigQuery", variant="primary")
             
             apply_result = gr.Textbox(label="Apply Status", interactive=False)
+
+            select_all_lineage_btn.click(select_all_lineage, inputs=[preview_output], outputs=[preview_output])
+            deselect_all_lineage_btn.click(deselect_all_lineage, inputs=[preview_output], outputs=[preview_output])
             
             preview_btn.click(
+                lambda: "", outputs=[apply_result]
+            ).then(
                 analyze_and_preview, 
                 inputs=[config_project, config_location, global_dataset, prop_table], 
                 outputs=[summary_output, preview_output]
@@ -308,15 +345,25 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
             recommendations_view = gr.Dataframe(
                 label="Glossary Recommendations (Select to apply)",
                 interactive=True,
-                wrap=True
+                wrap=True,
+                datatype=["bool", "str", "str", "number", "str", "str"]
             )
+            
+            with gr.Row():
+                select_all_glossary_btn = gr.Button("Select All", size="sm")
+                deselect_all_glossary_btn = gr.Button("Deselect All", size="sm")
             
             with gr.Row():
                 apply_glossary_btn = gr.Button("Apply Selected Terms to Dataplex", variant="primary")
             
             glossary_apply_result = gr.Textbox(label="Apply Status", interactive=False)
+
+            select_all_glossary_btn.click(select_all_glossary, inputs=[recommendations_view], outputs=[recommendations_view])
+            deselect_all_glossary_btn.click(deselect_all_glossary, inputs=[recommendations_view], outputs=[recommendations_view])
             
             recommend_btn.click(
+                lambda: "", outputs=[glossary_apply_result]
+            ).then(
                 get_glossary_recommendations,
                 inputs=[config_project, config_location, global_dataset, glossary_table],
                 outputs=recommendations_view

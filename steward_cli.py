@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description="Agentic Data Steward CLI")
     parser.add_argument("--project", "--project_id", dest="project", default=os.environ.get("GOOGLE_CLOUD_PROJECT", "governance-agent"), help="GCP Project ID")
     parser.add_argument("--location", default="europe-west1", help="GCP Location")
+    parser.add_argument("--yes", "-y", action="store_true", help="Automatically approve all prompts")
     
     subparsers = parser.add_subparsers(dest="command", help="Commands")
     
