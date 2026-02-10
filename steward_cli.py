@@ -27,7 +27,7 @@ def main():
     scan_parser.add_argument("--dataset", "--dataset_id", dest="dataset", required=True, help="BigQuery Dataset ID")
     
     # Apply command
-    apply_parser = subparsers.add_parser("apply", help="Preview and apply propagation for a table")
+    apply_parser = subparsers.add_parser("apply", help="Preview and apply description propagation for a table")
     apply_parser.add_argument("--dataset", "--dataset_id", dest="dataset", required=True, help="BigQuery Dataset ID")
     apply_parser.add_argument("--table", "--table_id", dest="table", required=True, help="BigQuery Table ID")
     # Glossary recommend command
@@ -57,7 +57,7 @@ def main():
             print("No propagation candidates found.")
             return
             
-        print("\nProposed Updates:")
+        print("\nProposed Description Updates:")
         # Display relevant columns
         display_df = df[["Target Column", "Source", "Proposed Description", "Confidence"]]
         print(display_df.to_string(index=False))

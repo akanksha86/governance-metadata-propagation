@@ -7,7 +7,7 @@ This project demonstrates an agentic data governance solution using Google Cloud
 ## 🌟 Key Features
 
 *   **Estate Dashboard**: Scan BigQuery datasets to identify metadata gaps (missing descriptions).
-*   **Recursive Lineage Propagation**: Automatically fetch descriptions from upstream sources, bridging multi-hop gaps.
+*   **Recursive Description Propagation**: Automatically fetch descriptions from upstream sources, bridging multi-hop gaps.
 *   **SQL-Based Logic Enrichment**: Extracts BigQuery SQL transformations to generate human-readable descriptions for computed columns.
 *   **AI Business Glossary**: Maps technical columns to business terms using Vertex AI Semantic Similarity.
 *   **Native Dataplex Integration**: Persists glossary mappings as native `EntryLinks` visible in the Dataplex Schema tab.
@@ -48,7 +48,7 @@ The Gradio app provides a visual way to scan and apply metadata changes.
 python3 ui/gradio_app.py
 ```
 - **Dashboard**: Run "Scan Dataset" to see health metrics.
-- **Propagation**: Enter a table name to preview and apply lineage-based descriptions.
+- **Description Propagation**: Enter a table name to preview and apply lineage-based descriptions.
 - **Settings**: Toggle OAuth/ADC modes for specific user actions.
 
 ### 2. Steward CLI (Headless)
@@ -57,7 +57,7 @@ The CLI is designed for automation and quick scans.
 # Scan a dataset for missing descriptions
 python3 steward_cli.py scan --dataset retail_syn_data
 
-# Preview and apply lineage propagation to a table
+# Preview and apply description propagation to a table
 python3 steward_cli.py apply --dataset retail_syn_data --table transactions
 
 # Recommend glossary terms using Vertex AI Semantic Similarity
@@ -78,7 +78,7 @@ python3 steward_cli.py glossary-recommend --dataset retail_syn_data --table tran
 | Module | Location | Description |
 | :--- | :--- | :--- |
 | **Glossary Plugin** | `agent/plugins/glossary_plugin.py` | Handles Business Glossary mapping using Vertex AI. |
-| **Lineage Plugin** | `agent/plugins/lineage_plugin.py` | Orchestrates metadata propagation via Lineage API. |
+| **Lineage Plugin** | `agent/plugins/lineage_plugin.py` | Orchestrates description propagation via Lineage API. |
 | **Similarity Engine** | `agent/plugins/similarity_engine.py` | AI logic for scoring lexical and semantic matches. |
 | **Traverser** | `dataplex_integration/lineage_propagation.py` | Low-level Graph API logic for traversing dependencies. |
 | **Enricher** | `dataplex_integration/lineage_propagation.py` | Context-aware SQL transformation analyzer. |

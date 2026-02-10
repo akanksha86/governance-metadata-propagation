@@ -57,11 +57,55 @@ class TransformationEnricher:
         source_lower = source_col.lower()
 
         # Date vs ID mismatch
-        if "date" in target_lower and "id" in source_lower: return 0.2
-        if "id" in target_lower and "date" in source_lower: return 0.2
+        if "date" in target_lower and "id" in source_lower: return 0.1
+        if "id" in target_lower and "date" in source_lower: return 0.1
 
         # Amount vs Flag mismatch
-        if "amount" in target_lower and ("flag" in source_lower or "is_" in source_lower): return 0.5
+        if "amount" in target_lower and ("flag" in source_lower or "is_" in source_lower): return 0.2
+
+        # Category/Name vs ID mismatch
+        if ("category" in target_lower or "name" in target_lower) and "id" in source_lower: return 0.1
+        if "id" in target_lower and ("category" in source_lower or "name" in source_lower): return 0.1
+
+        # Category/Name vs Amount mismatch
+        if ("category" in target_lower or "name" in target_lower) and "amount" in source_lower: return 0.1
+        if "amount" in target_lower and ("category" in source_lower or "name" in source_lower): return 0.1
+
+        # Category/Name vs Date mismatch
+        if ("category" in target_lower or "name" in target_lower) and "date" in source_lower: return 0.1
+        if "date" in target_lower and ("category" in source_lower or "name" in source_lower): return 0.1
+
+        # Amount vs ID mismatch
+        if "amount" in target_lower and "id" in source_lower: return 0.1
+        if "id" in target_lower and "amount" in source_lower: return 0.1
+
+        # Quantity vs Identity/Amount/Date mismatch
+        if "quantity" in target_lower and any(kw in source_lower for kw in ["id", "amount", "date", "name"]): return 0.1
+        if "quantity" in source_lower and any(kw in target_lower for kw in ["id", "amount", "date", "name"]): return 0.1
+
+        # ID vs ID mismatch (prefix conflict)
+        if "id" in target_lower and "id" in source_lower:
+            # Extract prefixes (everything before '_id' or 'id')
+            def get_id_prefix(s):
+                for suffix in ["_id", "id"]:
+                    if s.endswith(suffix):
+                        return s[:-len(suffix)].strip("_")
+                return s
+            
+            target_prefix = get_id_prefix(target_lower)
+            source_prefix = get_id_prefix(source_lower)
+            
+            # If prefixes exist and are fundamentally different (and not common aliases)
+            if target_prefix and source_prefix and target_prefix != source_prefix:
+                common_aliases = [{"order", "transaction"}, {"item", "product"}, {"customer", "user"}]
+                is_alias = False
+                for pair in common_aliases:
+                    if {target_prefix, source_prefix}.issubset(pair):
+                        is_alias = True
+                        break
+                
+                if not is_alias:
+                    return 0.1
 
         return 1.0
 
@@ -205,6 +249,20 @@ class LineageGraphTraverser:
             # parts indices: 4=project, 6=dataset, 8=table
             if len(parts) >= 9:
                 return f"{parts[4]}.{parts[6]}.{parts[8]}"
+        elif "/entryGroups/" in fqn and "/entries/" in fqn:
+            # projects/P/locations/L/entryGroups/G/entries/bigquery.googleapis.com/projects/P/datasets/D/tables/T
+            parts = fqn.split("/")
+            if "bigquery.googleapis.com" in parts:
+                idx = parts.index("bigquery.googleapis.com")
+                # Look for project name after 'projects'
+                p_name, d_name, t_name = "", "", ""
+                for i in range(idx, len(parts) - 1):
+                    if parts[i] == 'projects' and not p_name: p_name = parts[i+1]
+                    if parts[i] == 'datasets' and not d_name: d_name = parts[i+1]
+                    if parts[i] == 'tables' and not t_name: t_name = parts[i+1]
+                
+                if p_name and d_name and t_name:
+                    return f"{p_name}.{d_name}.{t_name}"
         elif fqn.startswith("bigquery:"):
             return fqn.replace("bigquery:", "")
         return fqn
@@ -260,9 +318,7 @@ class LineageGraphTraverser:
                 if not links:
                     continue
 
-                best_match = None
-                max_score = -1.0
-
+                matches = []
                 for link in links:
                     source = link.get("source", {})
                     source_fqn = source.get("fullyQualifiedName")
@@ -272,7 +328,7 @@ class LineageGraphTraverser:
                         continue
 
                     for src_field in source_fields:
-                        score = 0.5 
+                        score = 0.1 
                         if src_field == col: score = 1.0
                         elif src_field.lower() == col.lower(): score = 0.95
                         elif src_field.replace("_", "") == col.replace("_", ""): score = 0.9
@@ -282,19 +338,19 @@ class LineageGraphTraverser:
                         penalty = TransformationEnricher.check_semantic_mismatch(col, src_field)
                         score = score * penalty
 
-                        if score > max_score:
-                            max_score = score
-                            best_match = {
+                        if score >= 0.05: # Threshold for considering as valid lineage (allowing penalized links for structural enrichment)
+                            matches.append({
                                 "source_fqn": source_fqn,
-                                "source_entity": source_fqn.split(':')[-1] if ':' in source_fqn else source_fqn,
+                                "source_entity": self._normalize_fqn(source_fqn),
                                 "source_column": src_field,
                                 "confidence": round(score, 2),
                                 "semantic_penalty": True if penalty < 1.0 else False,
                                 "hop_depth": depth
-                            }
+                            })
                 
-                if best_match:
-                    column_mappings[col] = best_match
+                if matches:
+                    # Sort candidates by confidence
+                    column_mappings[col] = sorted(matches, key=lambda x: x['confidence'], reverse=True)
 
             except Exception as e:
                 logger.warning(f"Failed to fetch upstream lineage for column {col}: {e}")
@@ -303,32 +359,30 @@ class LineageGraphTraverser:
 
     def get_recursive_column_lineage(self, target_entry_name, target_columns, max_depth=3):
         """
-        Public method to start a recursive search.
-        It resolves lineage level by level until it finds a source for each column.
-        Currently, this is a simplified multi-hop resolver.
+        Resolves lineage multi-hop (Table -> View -> View) and explores branching paths.
+        Returns a map: target_col -> list of all unique ancestor mappings found.
         """
-        final_mappings = {}
-        columns_to_resolve = target_columns.copy()
+        final_paths = {col: [] for col in target_columns}
         
-        for d in range(max_depth):
-            if not columns_to_resolve:
-                break
-                
-            current_layer = self.get_column_lineage(target_entry_name, columns_to_resolve, depth=d, max_depth=max_depth)
+        for col in target_columns:
+            to_explore = [(target_entry_name, col, 0)]
+            seen_nodes = set()
             
-            for col, mapping in current_layer.items():
-                if col not in final_mappings:
-                    final_mappings[col] = mapping
-                    # Note: For true recursion where we want to find the ROOT source, 
-                    # we would need to call this again for each mapping's source_fqn.
-                    # But for now, we just resolve one level at a time for simplicity.
-            
-            # To be more thorough, we should iterate through mappings and resolve their sources
-            # This is a bit complex for a stateless helper without a BQ client here.
-            # We'll rely on the Plugin to coordinate deep resolution if needed.
-            break # Single-pass for now as a base
-
-        return final_mappings
+            while to_explore:
+                curr_ent, curr_col, depth = to_explore.pop(0)
+                if depth >= max_depth:
+                    continue
+                    
+                mappings = self.get_column_lineage(curr_ent, [curr_col], depth=depth, max_depth=max_depth)
+                for m in mappings.get(curr_col, []):
+                    # Cache unique nodes to avoid cycles or repeat work
+                    node_id = (m['source_fqn'], m['source_column'])
+                    if node_id not in seen_nodes:
+                        seen_nodes.add(node_id)
+                        final_paths[col].append(m)
+                        # Add to queue for deeper exploration
+                        to_explore.append((m['source_fqn'], m['source_column'], depth + 1))
+        return final_paths
 
     def get_downstream_lineage(self, source_entry_name, source_columns):
         """

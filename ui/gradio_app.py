@@ -87,7 +87,7 @@ def scan_dataset(project_id, location, dataset_id, request: gr.Request = None):
             if not gloss_agg.empty:
                 summary += f"📖 **Business Gaps**: {len(gloss_agg)} objects affected.\n"
             
-            summary += "\n*Detailed column recommendations are available in the 'Lineage Propagation' and 'Glossary Recommendations' tabs.*"
+            summary += "\n*Detailed column recommendations are available in the 'Description Propagation' and 'Glossary Recommendations' tabs.*"
 
         return summary, desc_agg, gloss_agg
     except Exception as e:
@@ -292,12 +292,12 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
                 outputs=[dash_summary, desc_output, glossary_gap_output]
             )
 
-        with gr.TabItem("Lineage Propagation"):
-            gr.Markdown("## 🧬 Analyze & Propagate Metadata")
+        with gr.TabItem("Description Propagation"):
+            gr.Markdown("## 🧬 Analyze & Propagate Descriptions")
             with gr.Row():
                 prop_table = gr.Textbox(label="Target Table", value="transactions")
             
-            preview_btn = gr.Button("Analyze Lineage & Preview Propagation", variant="primary")
+            preview_btn = gr.Button("Analyze & Preview Description Propagation", variant="primary")
             
             summary_output = gr.Markdown("Enter a table and click the button above to start analysis.")
             gr.Markdown("*(Optional: Click any cell in the **Proposed Description** column to refine it before applying)*")

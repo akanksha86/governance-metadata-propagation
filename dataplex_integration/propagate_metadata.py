@@ -88,11 +88,12 @@ def propagate_pull(project_id, dataset_id, target_table, lineage_traverser, desc
             continue
             
         # Check Lineage API results (High Confidence)
-        lineage_source = upstream_columns_map.get(target_col)
+        lineage_sources = upstream_columns_map.get(target_col, [])
         candidates = []
         
-        if lineage_source:
-             # We found direct lineage from API!
+        if lineage_sources:
+             # We found direct lineage from API! Take the best match.
+            lineage_source = lineage_sources[0]
             source_table_entity = lineage_source['source_entity'] 
             source_col = lineage_source['source_column']
             
