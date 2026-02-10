@@ -53,21 +53,21 @@ class TestRecursiveLineage(unittest.TestCase):
         def get_lineage_mock(target_fqn, columns, depth=0):
             if "table_c" in target_fqn:
                 return {
-                    "order_id": {
+                    "order_id": [{
                         "source_fqn": "bigquery:test-project.ds.table_b",
                         "source_entity": "table_b",
                         "source_column": "order_id",
                         "confidence": 1.0
-                    }
+                    }]
                 }
             if "table_b" in target_fqn:
                 return {
-                    "order_id": {
+                    "order_id": [{
                         "source_fqn": "bigquery:test-project.ds.table_a",
                         "source_entity": "table_a",
                         "source_column": "ordered_id",
                         "confidence": 0.95
-                    }
+                    }]
                 }
             return {}
 

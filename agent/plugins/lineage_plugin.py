@@ -89,13 +89,13 @@ class LineagePlugin(BasePlugin):
             
         # 1. Get immediate upstream
         upstream = self._lineage_traverser.get_column_lineage(target_fqn, [column], depth=depth)
-        source = upstream.get(column)
+        sources = upstream.get(column, [])
         
-        if not source:
+        if not sources:
             return None
-            
-        # 2. Extract SQL logic for the CURRENT target column if possible
-        # target_fqn is like 'bigquery:project.dataset.table'
+        
+        # 2. Extract SQL logic for the CURRENT target column to help pick the best source
+        logic = None
         try:
             parts = target_fqn.replace("bigquery:", "").split('.')
             if len(parts) == 3:
@@ -107,6 +107,19 @@ class LineagePlugin(BasePlugin):
                         accumulated_logic.append(logic)
         except Exception as e:
             logger.debug(f"Failed to extract intermediate SQL logic for {target_fqn}: {e}")
+
+        # 3. Select the best source (prioritize one mentioned in SQL logic)
+        source = sources[0] # Default to best by confidence
+        if logic:
+            logic_lower = logic.lower()
+            for s in sources:
+                src_col = s['source_column'].lower()
+                # Check for exact word match in logic
+                import re
+                if re.search(rf"\b{src_col}\b", logic_lower):
+                    source = s
+                    source['confidence'] = max(source['confidence'], 0.7)
+                    break
 
         # 3. Check if source has description
         src_entity = source['source_fqn'].replace("bigquery:", "")
@@ -137,7 +150,7 @@ class LineagePlugin(BasePlugin):
 
     def preview_propagation(self, dataset_id: str, target_table: str) -> pd.DataFrame:
         """
-        Simulates propagation for a specific table with multi-hop support and SQL parsing.
+        Simulates description propagation for a specific table with multi-hop support and SQL parsing.
         """
         self._ensure_initialized()
         target_fqn = f"bigquery:{self.project_id}.{dataset_id}.{target_table}"
@@ -188,7 +201,10 @@ class LineagePlugin(BasePlugin):
             f"bigquery:{full_table_name}", 
             columns
         )
-        upstream_entities = set(v['source_entity'] for v in upstream_map.values())
+        upstream_entities = set()
+        for candidates in upstream_map.values():
+            for c in candidates:
+                upstream_entities.add(c['source_entity'])
         
         # Downstream Analysis
         downstream_map = self._lineage_traverser.get_downstream_lineage(
@@ -201,13 +217,18 @@ class LineagePlugin(BasePlugin):
                 downstream_entities.add(t['target_entity'])
         
         # Generate Summary Text
-        summary = f"### Lineage Summary for `{table_id}`\n\n"
+        summary = f"### Propagation Summary for `{table_id}`\n\n"
         
         if upstream_entities:
             summary += f"**Upstream Sources ({len(upstream_entities)}):**\n"
             for ent in sorted(upstream_entities):
-                cols = [c for c, v in upstream_map.items() if v['source_entity'] == ent]
-                summary += f"- `{ent}` (contributes {len(cols)} columns)\n"
+                # Count columns that have this entity as their PRIMARY (best) source
+                cols = []
+                for c, candidates in upstream_map.items():
+                    if candidates and candidates[0]['source_entity'] == ent:
+                        cols.append(c)
+                if cols:
+                    summary += f"- `{ent}` (contributes {len(cols)} columns)\n"
         else:
             summary += "*No upstream sources found via Data Lineage API.*\n"
             
