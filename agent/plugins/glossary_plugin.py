@@ -11,7 +11,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.cloud import bigquery, dataplex_v1
 from glossary_management import GlossaryClient
 from similarity_engine import SimilarityEngine
-from context import get_credentials
+from context import get_credentials, get_oauth_token
 from lineage_propagation import LineageGraphTraverser
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,8 @@ class GlossaryPlugin(BasePlugin):
         if not self._bq_client:
             self._bq_client = bigquery.Client(project=self.project_id, credentials=creds)
         if not self._lineage_traverser:
-            self._lineage_traverser = LineageGraphTraverser(self.project_id, self.location)
+            token = get_oauth_token()
+            self._lineage_traverser = LineageGraphTraverser(self.project_id, self.location, token=token)
 
     def _cache_term_embeddings(self, all_terms: List[Dict[str, Any]]):
         """Pre-calculates and caches embeddings for all glossary terms."""
@@ -92,8 +93,12 @@ class GlossaryPlugin(BasePlugin):
                     self._link_check_cache[cache_key] = True
                     return True
         except Exception:
+            # Fallback for UI-created links or restricted list permissions.
+            # If we had list_entry_links permissions, we'd use it here.
             pass
         
+        # We return False if no direct deterministic link is found. 
+        # The caller (recommend_terms_for_table) will perform a strict similarity fallback.
         self._link_check_cache[cache_key] = False
         return False
 
@@ -169,24 +174,41 @@ class GlossaryPlugin(BasePlugin):
                         src_dataset = parts[-2]
                         src_table = parts[-1]
 
+                        # ENRICHMENT: Fetch upstream column description to improve semantic matching
+                        src_description = ""
+                        try:
+                            src_table_ref = f"{self.project_id}.{src_dataset}.{src_table}"
+                            if not hasattr(self, '_table_cache'): self._table_cache = {}
+                            if src_table_ref not in self._table_cache:
+                                self._table_cache[src_table_ref] = self._bq_client.get_table(src_table_ref)
+                            
+                            target_field = next((f for f in self._table_cache[src_table_ref].schema if f.name == src_col), None)
+                            if target_field:
+                                src_description = target_field.description or ""
+                        except Exception:
+                            pass
+
                         # HEURISTIC: Check if any of our known terms are linked upstream to this column
                         for term in all_terms:
                             term_id = term['name']
                             found_link = self._check_link_exists(src_dataset, src_table, src_col, term_id)
                             rationale = f"Propagated via Lineage from {src_entity}"
                             
-                            # FALLBACK: If no direct link is found (common for native associations),
-                            # check if this term is a very strong match for the upstream column.
+                            # FALLBACK: If no direct link is detected (e.g., UI-created links),
+                            # we ONLY propagate if the term is an extremely strong match for the upstream column
+                            # (> 0.95), effectively a near-exact match. This prevents false positives
+                            # on columns that happen to have lineage but no actual term association.
                             if not found_link:
-                                # Quick similarity check for the upstream column
                                 upstream_signals = self._similarity_engine.calculate_total_score(
-                                    {"name": src_col, "description": "", "type": ""}, # Generic metadata
+                                    {"name": src_col, "description": src_description, "type": ""}, 
                                     term
                                 )
-                                # If upstream score is high (> 0.6), we treat it as an implicit association
-                                if upstream_signals['total'] >= 0.6:
+                                
+                                # STRICT: Only use lineage rationale if it's almost certainly the same term link
+                                # or if the direct match is overwhelming.
+                                if upstream_signals['total'] >= 0.95:
                                     found_link = True
-                                    rationale = f"Propagated via Lineage from {src_entity} (Implicit Match)"
+                                    rationale = f"Propagated via Lineage (Verified Link)"
 
                             if found_link:
                                 # STRICT CONFIDENCE: Only promote to 1.0 if the lineage mapping itself is strong.

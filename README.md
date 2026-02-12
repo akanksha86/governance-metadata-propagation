@@ -10,6 +10,7 @@ This project demonstrates an agentic data governance solution using Google Cloud
 *   **Recursive Description Propagation**: Automatically fetch descriptions from upstream sources, bridging multi-hop gaps.
 *   **SQL-Based Logic Enrichment**: Extracts BigQuery SQL transformations to generate human-readable descriptions for computed columns.
 *   **AI Business Glossary**: Maps technical columns to business terms using Vertex AI Semantic Similarity.
+*   **Prioritized Lineage Propagation**: Automatically propagates glossary terms across tables based on lineage, with strict verification thresholds to ensure accuracy (especially for 1-1 mappings).
 *   **Native Dataplex Integration**: Persists glossary mappings as native `EntryLinks` visible in the Dataplex Schema tab.
 *   **Unified UI & CLI**: Manage governance tasks via a Gradio-based web app or a headless CLI.
 
