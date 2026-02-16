@@ -34,9 +34,20 @@ docker build --platform linux/amd64 -t ${IMAGE_NAME} .
 echo "📤 Pushing image to Artifact Registry..."
 docker push ${IMAGE_NAME}
 
-# 5. Extract env vars from .env for Cloud Run (excluding comments and empty lines)
-echo "📝 Preparing environment variables..."
-ENV_VARS=$(grep -v '^#' .env | grep -v '^\s*$' | tr '\n' ',' | sed 's/,$//')
+# 5. Extract env vars from .env for Cloud Run
+echo "📝 Preparing environment variables from .env..."
+if [ ! -f .env ]; then
+  echo "❌ Error: .env file not found. Please create one with GOOGLE_CLIENT_ID, etc."
+  exit 1
+fi
+
+# Parse .env: Skip comments/empty lines, handle optional quotes, and comma-separate for Cloud Run
+ENV_VARS=$(grep -v '^#' .env | grep -v '^\s*$' | sed 's/^//' | while read -r line; do
+  # Skip lines that don't look like KEY=VALUE
+  if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+    echo "$line"
+  fi
+done | tr '\n' ',' | sed 's/,$//')
 
 # 6. Deploy to Cloud Run
 echo "☸️ Deploying to Cloud Run..."
@@ -45,14 +56,12 @@ gcloud run deploy ${SERVICE_NAME} \
   --platform managed \
   --region ${REGION} \
   --port 7860 \
-  --set-env-vars="${ENV_VARS}"
+  --set-env-vars="${ENV_VARS}" \
+  --allow-unauthenticated
 
-# 7. Attempt to allow unauthenticated access (may fail due to IAM restrictions)
-echo "🔓 Attempting to enable public access..."
-gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
-  --region=${REGION} \
-  --member="allUsers" \
-  --role="roles/run.invoker" || echo "⚠️ Warning: Failed to set IAM policy. You may need to manually enable 'Allow unauthenticated' in the GCP Console."
-
-echo "✅ Deployment process finished!"
-gcloud run services describe ${SERVICE_NAME} --region ${REGION} --format 'value(status.url)'
+echo "✅ Deployment successful!"
+SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} --region ${REGION} --format 'value(status.url)')
+echo "🔗 App is available at: ${SERVICE_URL}"
+echo "------------------------------------------------------"
+echo "⚠️  REMINDER: Add ${SERVICE_URL}/google_callback to your Google OAuth Authorized Redirect URIs"
+echo "------------------------------------------------------"
