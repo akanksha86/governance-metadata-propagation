@@ -4,9 +4,10 @@ import logging
 import pandas as pd
 from typing import List, Dict, Any, Optional
 
-# Add adk_integration and dataplex_integration to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../adk_integration')))
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../dataplex_integration')))
+# Add adk_integration and dataplex_integration to relative path for plugin execution
+PLUGIN_DIR = os.path.dirname(__file__)
+sys.path.append(os.path.abspath(os.path.join(PLUGIN_DIR, '../adk_integration')))
+sys.path.append(os.path.abspath(os.path.join(PLUGIN_DIR, '../../dataplex_integration')))
 
 from google.adk.plugins.base_plugin import BasePlugin
 from google.oauth2.credentials import Credentials

@@ -60,8 +60,6 @@ class GlossaryPlugin(BasePlugin):
             new_cache = {term_ids[i]: embs[i] for i in range(len(embs))}
             self._similarity_engine.term_embeddings.update(new_cache)
 
-    # _get_existing_links was removed because ListEntryLinks is currently restricted in this environment.
-    # Targeted deduplication via _check_link_exists is used instead.
     def _check_link_exists(self, dataset_id: str, table_id: str, col_name: str, term_id: str) -> bool:
         """Checks if a specific term is already linked to a column using deterministic IDs."""
 
@@ -101,6 +99,25 @@ class GlossaryPlugin(BasePlugin):
         # The caller (recommend_terms_for_table) will perform a strict similarity fallback.
         self._link_check_cache[cache_key] = False
         return False
+
+    def _is_column_linked(self, dataset_id: str, table_id: str, col_name: str) -> bool:
+        """Checks if a column has ANY glossary term linked to it using deterministic IDs."""
+        
+        # We check for the deterministic ID used in apply_terms
+        client = dataplex_v1.CatalogServiceClient(credentials=get_credentials(self.project_id))
+        
+        clean_column = col_name.replace("_", "-").lower()
+        clean_table = table_id.replace("_", "-").lower()
+        entry_link_id = f"link-{clean_table}-{clean_column}"
+        
+        parent = f"projects/{self.project_id}/locations/{self.location}/entryGroups/@bigquery"
+        link_name = f"{parent}/entryLinks/{entry_link_id}"
+        
+        try:
+            client.get_entry_link(name=link_name)
+            return True
+        except Exception:
+            return False
 
     def recommend_terms_for_table(self, dataset_id: str, table_id: str) -> pd.DataFrame:
         """
@@ -382,14 +399,9 @@ class GlossaryPlugin(BasePlugin):
         client = dataplex_v1.CatalogServiceClient(credentials=get_credentials(self.project_id))
         
         parent = f"projects/{self.project_id}/locations/{self.location}"
-        # Links for BigQuery entries are in the @bigquery group
-        link_group_name = f"{parent}/entryGroups/@bigquery"
         
-        # NOTE: list_entry_links is currently restricted, so this scan may be incomplete.
-        # It relies on legacy description-based tags for discovery in this environment.
-        existing_links = {}
         # NOTE: list_entry_links is currently restricted in this environment, 
-        # so this scan relies on legacy description-based tags for discovery.
+        # so this scan relies on deterministic EntryLink ID checks.
 
         dataset_ref = self._bq_client.dataset(dataset_id)
         tables = self._bq_client.list_tables(dataset_ref)
@@ -401,18 +413,18 @@ class GlossaryPlugin(BasePlugin):
             entry_name = self._get_entry_name(dataset_id, table_id)
             
             for field in full_table.schema:
-                path = f"Schema.{field.name}"
-                
-                # Check if link exists
-                if (entry_name, path) not in existing_links:
-                    # Also check legacy BQ description for backward compatibility
-                    desc = field.description or ""
-                    if "Business Glossary:" not in desc:
-                        gaps.append({
-                            "Table": table_id,
-                            "Column": field.name,
-                            "Type": field.field_type
-                        })
+                # 1. Check for native EntryLink (Deterministic CID)
+                if self._is_column_linked(dataset_id, table_id, field.name):
+                    continue
+
+                # 2. Check legacy BQ description for backward compatibility
+                desc = field.description or ""
+                if "Business Glossary:" not in desc:
+                    gaps.append({
+                        "Table": table_id,
+                        "Column": field.name,
+                        "Type": field.field_type
+                    })
         
         return pd.DataFrame(gaps)
 
