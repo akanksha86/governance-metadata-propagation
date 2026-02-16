@@ -13,6 +13,7 @@ This project demonstrates an agentic data governance solution using Google Cloud
 *   **Prioritized Lineage Propagation**: Automatically propagates glossary terms across tables based on lineage, with strict verification thresholds to ensure accuracy (especially for 1-1 mappings).
 *   **Native Dataplex Integration**: Persists glossary mappings as native `EntryLinks` visible in the Dataplex Schema tab.
 *   **Unified UI & CLI**: Manage governance tasks via a Gradio-based web app or a headless CLI.
+*   **CLL API Preview allowlisting required**: Please contact your Google Cloud account team to get access to CLL API
 
 ---
 
