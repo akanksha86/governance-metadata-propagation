@@ -617,13 +617,16 @@ if __name__ == "__main__":
     async def login(request: fastapi.Request):
         # Allow override from .env if needed, but default to /google_callback
         redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:7860/google_callback")
-        logger.info(f"Initiating login with redirect_uri: {redirect_uri}")
+        client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+        logger.info(f"Initiating login: client_id={client_id[:10]}... redirect_uri={redirect_uri}")
         return await oauth_config.google.authorize_redirect(request, redirect_uri)
 
     @main_app.get("/google_callback")
     async def auth_callback(request: fastapi.Request):
         try:
-            token = await oauth_config.google.authorize_access_token(request)
+            # Explicitly pass redirect_uri to match what was sent during authorization
+            redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:7860/google_callback")
+            token = await oauth_config.google.authorize_access_token(request, redirect_uri=redirect_uri)
             request.session["google_token"] = token
             logger.info("Successfully received token and stored in session.")
             return RedirectResponse(url="/")
@@ -640,4 +643,6 @@ if __name__ == "__main__":
     app = gr.mount_gradio_app(main_app, demo, path="/")
 
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", 7860))
+    uvicorn.run(app, host=host, port=port)
