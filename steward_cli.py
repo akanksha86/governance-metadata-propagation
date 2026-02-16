@@ -43,6 +43,8 @@ def main():
     policy_propagate_parser.add_argument("--dataset", "--dataset_id", dest="dataset", required=True, help="BigQuery Dataset ID")
     policy_propagate_parser.add_argument("--table", "--table_id", dest="table", required=True, help="BigQuery Table ID")
     policy_propagate_parser.add_argument("--apply", action="store_true", help="Apply recommendations directly without confirmation")
+    policy_propagate_parser.add_argument("--propagate-access", action="store_true", help="Also propagate Fine-Grained Access Control (IAM) from source tags")
+    policy_propagate_parser.add_argument("--readers", help="Comma-separated list of additional readers to add to the policy tags")
     
     args = parser.parse_args()
     
@@ -120,29 +122,41 @@ def main():
             print("No policy tag propagation recommendations found.")
         else:
             print("\nPolicy Tag Propagation Recommendations:")
-            print(df[["Target Column", "Source Table", "Policy Tags", "Recommendation", "Logic"]].to_string(index=False))
+            cols_to_show = ["Target Column", "Source Table", "Policy Tags", "Recommendation", "Logic", "Target Reader Propagation"]
+            print(df[cols_to_show].to_string(index=False))
             
             if args.apply:
                 do_apply = True
             elif args.yes:
                 do_apply = True
             else:
-                confirm = input("\nApply these policy tags to BigQuery? (y/N): ")
+                confirm = input("\nApply these policy tags (and access if requested) to BigQuery? (y/N): ")
                 do_apply = confirm.lower() == 'y'
                 
             if do_apply:
                 print("Applying policy tags...")
                 updates = []
                 for _, row in df.iterrows():
-                    # Only apply if recommended or if user forced it? 
-                    # For now, apply all recommendations shown.
-                    updates.append({
+                    update = {
                         "table": args.table,
                         "column": row["Target Column"],
-                        "policy_tag": row["Policy Tags"].split(", ")[0] # Use first tag if multiple
-                    })
+                        "policy_tag": row["Policy Tags"].split(", ")[0]
+                    }
+                    
+                    # Merge readers from propagation and additional readers
+                    all_readers = []
+                    if args.propagate_access and row["Target Reader Propagation"] != "No specific readers":
+                        all_readers.extend([r.strip() for r in row["Target Reader Propagation"].split(",") if r.strip()])
+                    
+                    if args.readers:
+                        all_readers.extend([r.strip() for r in args.readers.split(",") if r.strip()])
+                    
+                    if all_readers:
+                        update["readers"] = list(set(all_readers)) # De-duplicate
+                        
+                    updates.append(update)
                 policy_plugin.apply_policy_tags(args.dataset, updates)
-                print("Successfully updated policy tags in BigQuery.")
+                print("Successfully updated policy tags and access in BigQuery.")
             else:
                 print("Operation cancelled.")
 

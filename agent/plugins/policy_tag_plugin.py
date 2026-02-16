@@ -10,7 +10,8 @@ sys.path.append(os.path.abspath(os.path.join(PLUGIN_DIR, '../adk_integration')))
 sys.path.append(os.path.abspath(os.path.join(PLUGIN_DIR, '../../dataplex_integration')))
 
 from google.adk.plugins.base_plugin import BasePlugin
-from google.cloud import bigquery
+from google.cloud import bigquery, datacatalog_v1
+from google.iam.v1 import policy_pb2, iam_policy_pb2
 from context import get_credentials, get_oauth_token
 from lineage_propagation import LineageGraphTraverser, TransformationEnricher, SQLFetcher
 
@@ -23,6 +24,7 @@ class PolicyTagPlugin(BasePlugin):
         self.location = location
         self._lineage_traverser = None
         self._sql_fetcher = None
+        self._pt_client = None
 
     def _get_credentials(self):
         return get_credentials(self.project_id)
@@ -30,6 +32,10 @@ class PolicyTagPlugin(BasePlugin):
     def _get_bq_client(self):
         creds = self._get_credentials()
         return bigquery.Client(project=self.project_id, credentials=creds)
+
+    def _get_pt_client(self):
+        creds = self._get_credentials()
+        return datacatalog_v1.PolicyTagManagerClient(credentials=creds)
 
     def _ensure_initialized(self):
         creds = self._get_credentials()
@@ -40,6 +46,9 @@ class PolicyTagPlugin(BasePlugin):
             
         if not self._sql_fetcher:
             self._sql_fetcher = SQLFetcher(self.project_id, self.location, credentials=creds)
+            
+        if not self._pt_client:
+            self._pt_client = self._get_pt_client()
 
     def scan_for_policy_tags(self, dataset_id: str) -> pd.DataFrame:
         """
@@ -122,18 +131,69 @@ class PolicyTagPlugin(BasePlugin):
                                 logger.info(f"Skipping recommendation for {field.name} - tag already applied.")
                                 continue
 
+                            # Fetch IAM policy for the source tag (FineGrainedReaders)
+                            readers = self.get_policy_tag_readers(src_tag_names[0]) if src_tag_names else []
+
                             recommendations.append({
                                 "Target Column": field.name,
                                 "Source Table": src_entity,
                                 "Source Column": src_col,
                                 "Policy Tags": ", ".join(src_tag_names),
                                 "Recommendation": recommendation,
-                                "Logic": logic or "Straight Pull"
+                                "Logic": logic or "Straight Pull",
+                                "Target Reader Propagation": ", ".join(readers) if readers else "No specific readers"
                             })
                 except Exception as e:
                     logger.warning(f"Failed to check source {src_entity}: {e}")
 
         return pd.DataFrame(recommendations)
+
+    def get_policy_tag_readers(self, policy_tag_id: str) -> List[str]:
+        """Retrieves members with FineGrainedReader role on a policy tag."""
+        self._ensure_initialized()
+        try:
+            request = iam_policy_pb2.GetIamPolicyRequest(resource=policy_tag_id)
+            policy = self._pt_client.get_iam_policy(request=request)
+            
+            readers = []
+            for binding in policy.bindings:
+                if binding.role == "roles/datacatalog.categoryFineGrainedReader":
+                    readers.extend(binding.members)
+            return readers
+        except Exception as e:
+            logger.error(f"Failed to get IAM policy for {policy_tag_id}: {e}")
+            return []
+
+    def set_policy_tag_readers(self, policy_tag_id: str, new_readers: List[str]):
+        """Adds members to FineGrainedReader role on a policy tag."""
+        self._ensure_initialized()
+        try:
+            get_request = iam_policy_pb2.GetIamPolicyRequest(resource=policy_tag_id)
+            policy = self._pt_client.get_iam_policy(request=get_request)
+            
+            # Find or create binding for FineGrainedReader
+            found = False
+            for binding in policy.bindings:
+                if binding.role == "roles/datacatalog.categoryFineGrainedReader":
+                    # Add only new members
+                    existing = set(binding.members)
+                    for m in new_readers:
+                        if m not in existing:
+                            binding.members.append(m)
+                    found = True
+                    break
+            
+            if not found:
+                new_binding = policy.bindings.add()
+                new_binding.role = "roles/datacatalog.categoryFineGrainedReader"
+                new_binding.members.extend(new_readers)
+            
+            set_request = iam_policy_pb2.SetIamPolicyRequest(resource=policy_tag_id, policy=policy)
+            self._pt_client.set_iam_policy(request=set_request)
+            logger.info(f"Successfully updated IAM policy for {policy_tag_id}")
+        except Exception as e:
+            logger.error(f"Failed to set IAM policy for {policy_tag_id}: {e}")
+            raise
 
     def apply_policy_tags(self, dataset_id: str, updates: List[Dict[str, str]]):
         """
@@ -167,7 +227,17 @@ class PolicyTagPlugin(BasePlugin):
                     table.schema = new_schema
                     client.update_table(table, ["schema"])
                     logger.info(f"Successfully applied policy tag to {table_id}.{col_name}")
+                    
+                    # Handle Access Propagation / Providing Access
+                    readers = update.get('readers', [])
+                    if isinstance(readers, str):
+                        readers = [r.strip() for r in readers.split(",") if r.strip()]
+                    
+                    if readers:
+                        logger.info(f"Applying IAM readers to tag {tag_name}: {readers}")
+                        self.set_policy_tag_readers(tag_name, readers)
+                        
                 else:
                     logger.warning(f"Column {col_name} not found in {table_id}")
             except Exception as e:
-                logger.error(f"Failed to apply policy tag to {table_ref}.{col_name}: {e}")
+                logger.error(f"Failed to apply policy tag to {table_ref}.{col_name}: {e}", exc_info=True)

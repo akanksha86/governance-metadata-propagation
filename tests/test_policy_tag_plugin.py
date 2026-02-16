@@ -9,6 +9,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../agen
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../dataplex_integration')))
 
 from policy_tag_plugin import PolicyTagPlugin
+from google.iam.v1 import policy_pb2
 
 class TestPolicyTagPlugin(unittest.TestCase):
     @patch('policy_tag_plugin.get_credentials')
@@ -18,6 +19,7 @@ class TestPolicyTagPlugin(unittest.TestCase):
         self.plugin._get_bq_client = MagicMock()
         self.plugin._lineage_traverser = MagicMock()
         self.plugin._sql_fetcher = MagicMock()
+        self.plugin._pt_client = MagicMock()
 
     def test_scan_for_policy_tags(self):
         # Mock BigQuery list_tables and get_table
@@ -69,6 +71,15 @@ class TestPolicyTagPlugin(unittest.TestCase):
         
         # Mock SQL logic (straight pull)
         self.plugin._sql_fetcher.get_transformation_sql.return_value = "SELECT col1 FROM source"
+        
+        # Mock IAM call for get_readers
+        mock_iam_policy = MagicMock()
+        mock_binding = MagicMock()
+        mock_binding.role = "roles/datacatalog.categoryFineGrainedReader"
+        mock_binding.members = ["user:src-reader@example.com"]
+        mock_iam_policy.bindings = [mock_binding]
+        self.plugin._pt_client.get_iam_policy.return_value = mock_iam_policy
+
         with patch('policy_tag_plugin.TransformationEnricher.extract_column_logic', return_value="col1"):
             df = self.plugin.preview_policy_tag_propagation("test_dataset", "test_table")
         
@@ -106,6 +117,12 @@ class TestPolicyTagPlugin(unittest.TestCase):
         
         # Mock SQL logic (transformation)
         self.plugin._sql_fetcher.get_transformation_sql.return_value = "SELECT UPPER(src_col) as col1 FROM source"
+        
+        # Mock IAM call
+        mock_iam_policy = MagicMock()
+        mock_iam_policy.bindings = []
+        self.plugin._pt_client.get_iam_policy.return_value = mock_iam_policy
+
         with patch('policy_tag_plugin.TransformationEnricher.extract_column_logic', return_value="UPPER(src_col)"):
             df = self.plugin.preview_policy_tag_propagation("test_dataset", "test_table")
         
@@ -132,6 +149,44 @@ class TestPolicyTagPlugin(unittest.TestCase):
         
         # Verify update_table was called
         self.assertTrue(self.plugin._get_bq_client.return_value.update_table.called)
+
+    def test_apply_policy_tags_with_readers(self):
+        # Mock table
+        mock_field = MagicMock()
+        mock_field.name = "col1"
+        mock_field.to_api_repr.return_value = {"name": "col1", "type": "STRING"}
+        mock_table = MagicMock()
+        mock_table.schema = [mock_field]
+        self.plugin._get_bq_client.return_value.get_table.return_value = mock_table
+        
+        # Use actual Policy object (or something that works with SetIamPolicyRequest)
+        mock_policy = policy_pb2.Policy()
+        self.plugin._pt_client.get_iam_policy.return_value = mock_policy
+        
+        updates = [{
+            "table": "test_table",
+            "column": "col1",
+            "policy_tag": "tag1",
+            "readers": ["user:new@example.com"]
+        }]
+        
+        self.plugin.apply_policy_tags("test_ds", updates)
+        
+        # Verify BQ update
+        self.assertTrue(self.plugin._get_bq_client.return_value.update_table.called)
+        # Verify IAM update (set_iam_policy should be called now as set_policy_tag_readers won't crash)
+        self.assertTrue(self.plugin._pt_client.set_iam_policy.called)
+
+    def test_get_policy_tag_readers(self):
+        mock_policy = MagicMock()
+        mock_binding = MagicMock()
+        mock_binding.role = "roles/datacatalog.categoryFineGrainedReader"
+        mock_binding.members = ["user:test@example.com"]
+        mock_policy.bindings = [mock_binding]
+        self.plugin._pt_client.get_iam_policy.return_value = mock_policy
+        
+        readers = self.plugin.get_policy_tag_readers("tag1")
+        self.assertIn("user:test@example.com", readers)
 
     def test_preview_policy_tag_propagation_skips_existing(self):
         # Mock target table where col1 ALREADY has the tag
