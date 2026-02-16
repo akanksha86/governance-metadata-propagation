@@ -518,29 +518,13 @@ with gr.Blocks(title="Dataplex Data Steward") as demo:
             )
 
         with gr.TabItem("Description Propagation"):
-            gr.Markdown("## 🧬 Analyze & Propagate Descriptions")
-            with gr.Row():
-                prop_table = gr.Textbox(label="Target Table", value="transactions")
-            
-            preview_btn = gr.Button("Analyze & Preview Description Propagation", variant="primary")
-            
-            summary_output = gr.Markdown("Enter a table and click the button above to start analysis.")
-            gr.Markdown("*(Optional: Click any cell in the **Proposed Description** column to refine it before applying)*")
-            preview_output = gr.Dataframe(
-                label="Propagation Candidates (Edit 'Proposed Description' only)", 
-                interactive=True, 
-                wrap=True,
-                datatype=["bool", "str", "str", "str", "number", "str", "str"]
-            )
-            
-            with gr.Row():
-                select_all_lineage_btn = gr.Button("Select All", size="sm")
-                deselect_all_lineage_btn = gr.Button("Deselect All", size="sm")
-            
-            with gr.Row():
-                apply_btn = gr.Button("Apply Selection to BigQuery", variant="primary")
-            
             with gr.Column(elem_classes=["gcp-card"]):
+                gr.Markdown("## 🧬 Analyze & Propagate Descriptions")
+                with gr.Row():
+                    prop_table = gr.Textbox(label="Target Table", value="transactions")
+                
+                preview_btn = gr.Button("Analyze & Preview Description Propagation", variant="primary", elem_classes=["gr-button-primary"])
+                
                 summary_output = gr.Markdown("Enter a table and click the button above to start analysis.")
                 gr.Markdown("*(Optional: Click any cell in the **Proposed Description** column to refine it before applying)*")
                 preview_output = gr.Dataframe(
