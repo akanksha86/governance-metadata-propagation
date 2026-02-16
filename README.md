@@ -53,7 +53,30 @@ python3 ui/gradio_app.py
 - **Description Propagation**: Enter a table name to preview and apply lineage-based descriptions.
 - **Settings**: Toggle OAuth/ADC modes for specific user actions.
 
-### 2. Steward CLI (Headless)
+### 3. 🐳 Deployment (Docker & Cloud Run)
+For production or headless environments, the app is container-ready.
+
+**Local Docker**:
+```bash
+# 1. Build
+docker build -t steward-app .
+
+# 2. Run (with local GCP credentials)
+docker run -p 7860:7860 \
+  --env-file .env \
+  -v ~/.config/gcloud:/root/.config/gcloud \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json \
+  steward-app
+```
+
+**Cloud Run Deployment**:
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+*Note: Ensure your Service URL is added to the Authorized Redirect URIs in your GCP OAuth Client credentials.*
+
+### 4. Steward CLI (Headless)
 The CLI is designed for automation and quick scans.
 ```bash
 # Scan a dataset for missing descriptions
