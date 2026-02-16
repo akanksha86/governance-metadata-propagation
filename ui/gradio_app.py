@@ -84,8 +84,18 @@ def scan_dataset(project_id, location, dataset_id, request: gr.Request = None):
         gloss_count = len(glossary_df)
         orphan_count = len(orphans_df)
         
-        summary = f"### 🛡️ Governance Health: {dataset_id}\n"
-        summary += f"Proactive scan complete. Use the tabs below to address these gaps."
+        if desc_count == 0 and gloss_count == 0:
+            summary = "✅ **Metadata Estate is Complete!** All objects have both technical descriptions and business glossary mappings."
+        else:
+            summary = f"### 📊 Governance Gap Analysis\n"
+            summary += f"We found **{desc_count}** column gaps in technical descriptions and **{gloss_count}** column gaps in business glossary mappings.\n\n"
+            
+            if not desc_agg.empty:
+                summary += f"🔍 **Technical Gaps**: {len(desc_agg)} objects affected.\n"
+            if not gloss_agg.empty:
+                summary += f"📖 **Business Gaps**: {len(gloss_agg)} objects affected.\n"
+            
+            summary += "\n*Detailed column recommendations are available in the 'Description Propagation' and 'Glossary Recommendations' tabs.*"
 
         return summary, desc_agg, gloss_agg, orphan_agg, str(desc_count), str(gloss_count), str(orphan_count)
     except Exception as e:
@@ -507,13 +517,28 @@ with gr.Blocks(title="Dataplex Data Steward") as demo:
                 outputs=[dash_summary, desc_output, glossary_gap_output, orphan_output, desc_metric, gloss_metric, orphan_metric]
             )
 
-        with gr.TabItem("Lineage Propagation"):
-            with gr.Column(elem_classes=["gcp-card"]):
-                gr.Markdown("## 🧬 Analyze & Propagate Metadata")
-                with gr.Row():
-                    prop_table = gr.Textbox(label="Target Table", value="transactions")
-                
-                preview_btn = gr.Button("Analyze Lineage & Preview Propagation", variant="primary", elem_classes=["gr-button-primary"])
+        with gr.TabItem("Description Propagation"):
+            gr.Markdown("## 🧬 Analyze & Propagate Descriptions")
+            with gr.Row():
+                prop_table = gr.Textbox(label="Target Table", value="transactions")
+            
+            preview_btn = gr.Button("Analyze & Preview Description Propagation", variant="primary")
+            
+            summary_output = gr.Markdown("Enter a table and click the button above to start analysis.")
+            gr.Markdown("*(Optional: Click any cell in the **Proposed Description** column to refine it before applying)*")
+            preview_output = gr.Dataframe(
+                label="Propagation Candidates (Edit 'Proposed Description' only)", 
+                interactive=True, 
+                wrap=True,
+                datatype=["bool", "str", "str", "str", "number", "str", "str"]
+            )
+            
+            with gr.Row():
+                select_all_lineage_btn = gr.Button("Select All", size="sm")
+                deselect_all_lineage_btn = gr.Button("Deselect All", size="sm")
+            
+            with gr.Row():
+                apply_btn = gr.Button("Apply Selection to BigQuery", variant="primary")
             
             with gr.Column(elem_classes=["gcp-card"]):
                 summary_output = gr.Markdown("Enter a table and click the button above to start analysis.")

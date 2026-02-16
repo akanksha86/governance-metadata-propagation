@@ -148,67 +148,67 @@ class SimilarityEngine:
         return min(score, 1.0)
 
 
-    def get_ranked_suggestions(self, column: Dict[str, Any], all_terms: List[Dict[str, Any]], col_embedding: Optional[List[float]] = None) -> List[Dict[str, Any]]:
-        """Produces ranked suggestions for a single column with adaptive filtering and entity awareness."""
-        suggestions = []
+    def calculate_total_score(self, column: Dict[str, Any], term: Dict[str, Any], col_embedding: Optional[List[float]] = None) -> Dict[str, Any]:
+        """Calculates combined score and returns detailed signals."""
         col_name = column['name']
         col_entity = self._get_primary_entity(col_name)
         
-        for term in all_terms:
-            term_id_full = term['name']
-            term_id_base = term_id_full.split('/')[-1]
-            term_display = term['display_name']
+        term_id_full = term['name']
+        term_id_base = term_id_full.split('/')[-1]
+        term_display = term['display_name']
+        
+        lexical = self.calculate_lexical_similarity(col_name, term_display, term_id=term_id_base)
+        semantic = self.calculate_semantic_similarity(column, term, col_embedding=col_embedding)
+        
+        # Combine scores
+        score = (lexical * self.weights['lexical']) + (semantic * self.weights['semantic'])
+        
+        # 1. Entity Conflict Penalty
+        conflict = self._detect_entity_conflict(col_name, term_display, term_id_base)
+        if conflict:
+            score -= 0.30
+        
+        # 2. Entity Match Boost
+        term_entity = self._get_primary_entity(term_display) or self._get_primary_entity(term_id_base)
+        if col_entity and term_entity and col_entity == term_entity:
+            score += 0.15
             
-            lexical = self.calculate_lexical_similarity(col_name, term_display, term_id=term_id_base)
-            semantic = self.calculate_semantic_similarity(column, term, col_embedding=col_embedding)
+        # 3. Concept Alignment
+        col_concept = self._get_concept(col_name)
+        term_concept = self._get_concept(term_display) or self._get_concept(term_id_base)
+        
+        if col_concept and term_concept:
+            if col_concept == term_concept:
+                score += 0.1
+            else:
+                score -= 0.35
+        
+        # 4. Exact Word Match Boost
+        col_words = set(self._normalize(col_name).split())
+        term_words = set(self._normalize(term_display).split())
+        if col_words.intersection(term_words):
+            score += 0.05
             
-            # Combine scores
-            score = (lexical * self.weights['lexical']) + (semantic * self.weights['semantic'])
-            
-            orig_score = score
-            # 1. Entity Conflict Penalty: Prevent 'customer_id' matching 'order_id'
-            conflict = self._detect_entity_conflict(col_name, term_display, term_id_base)
-            if conflict:
-                score -= 0.30 # Strong penalty to suppress irrelevant matches
-            
-            # 2. Entity Match Boost
-            term_entity = self._get_primary_entity(term_display) or self._get_primary_entity(term_id_base)
-            boost = 0
-            if col_entity and term_entity and col_entity == term_entity:
-                boost = 0.15 # Increased boost
-                score += boost
-                
-            # 3. Concept Alignment: If both are IDs or both are Amounts, they should be closer
-            col_concept = self._get_concept(col_name)
-            term_concept = self._get_concept(term_display) or self._get_concept(term_id_base)
-            
-            if col_concept and term_concept:
-                if col_concept == term_concept:
-                    boost = 0.1
-                    score += boost
-                else:
-                    # CONCEPT MISMATCH: If one is ID and other is Timestamp, apply heavy penalty
-                    # even if the entity (e.g. 'transaction') matches.
-                    score -= 0.35 # Strong penalty for conceptual mismatch
-            
-            # 4. Exact Word Match Boost (e.g. 'amount' matching 'Amount' exactly)
-            col_words = set(self._normalize(col_name).split())
-            term_words = set(self._normalize(term_display).split())
-            if col_words.intersection(term_words):
-                score += 0.05
+        return {
+            "total": round(max(0, score), 2),
+            "lexical": round(lexical, 2),
+            "semantic": round(semantic, 2)
+        }
 
-            # 4. Base Thresholding
+    def get_ranked_suggestions(self, column: Dict[str, Any], all_terms: List[Dict[str, Any]], col_embedding: Optional[List[float]] = None) -> List[Dict[str, Any]]:
+        """Produces ranked suggestions for a single column with adaptive filtering and entity awareness."""
+        suggestions = []
+        for term in all_terms:
+            signals = self.calculate_total_score(column, term, col_embedding=col_embedding)
+            score = signals['total']
+            
+            # Base Thresholding
             if score >= 0.30:
                 suggestions.append({
-                    "term_name": term_id_full,
-                    "display_name": term_display,
-                    "confidence": round(max(0, score), 2),
-                    "signals": {
-                        "lexical": round(lexical, 2),
-                        "semantic": round(semantic, 2),
-                        "conflict": conflict,
-                        "boost": boost
-                    }
+                    "term_name": term['name'],
+                    "display_name": term['display_name'],
+                    "confidence": score,
+                    "signals": signals
                 })
                 
         # Sort by confidence
@@ -218,8 +218,6 @@ class SimilarityEngine:
         if suggestions:
             top_score = suggestions[0]['confidence']
             if top_score > 0.45:
-                # Keep suggestions within 70% of the top score if the leader is strong.
-                # This prevents "noise" when one term is clearly the best match.
                 suggestions = [s for s in suggestions if s['confidence'] >= (top_score * 0.7)]
         
         return suggestions[:5] # Top 5 relevant matches

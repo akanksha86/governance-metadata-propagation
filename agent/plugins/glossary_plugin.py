@@ -11,7 +11,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.cloud import bigquery, dataplex_v1
 from glossary_management import GlossaryClient
 from similarity_engine import SimilarityEngine
-from context import get_credentials
+from context import get_credentials, get_oauth_token
 from lineage_propagation import LineageGraphTraverser
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ class GlossaryPlugin(BasePlugin):
         self._similarity_engine = None
         self._bq_client = None
         self._lineage_traverser = None
+        self._link_check_cache = {} # Cache for _check_link_exists: (dataset, table, col, term) -> bool
 
     def _ensure_initialized(self):
         creds = get_credentials(self.project_id)
@@ -36,7 +37,8 @@ class GlossaryPlugin(BasePlugin):
         if not self._bq_client:
             self._bq_client = bigquery.Client(project=self.project_id, credentials=creds)
         if not self._lineage_traverser:
-            self._lineage_traverser = LineageGraphTraverser(self.project_id, self.location)
+            token = get_oauth_token()
+            self._lineage_traverser = LineageGraphTraverser(self.project_id, self.location, token=token)
 
     def _cache_term_embeddings(self, all_terms: List[Dict[str, Any]]):
         """Pre-calculates and caches embeddings for all glossary terms."""
@@ -60,9 +62,14 @@ class GlossaryPlugin(BasePlugin):
 
     # _get_existing_links was removed because ListEntryLinks is currently restricted in this environment.
     # Targeted deduplication via _check_link_exists is used instead.
-
     def _check_link_exists(self, dataset_id: str, table_id: str, col_name: str, term_id: str) -> bool:
         """Checks if a specific term is already linked to a column using deterministic IDs."""
+
+        # 1. Check cache first
+        cache_key = (dataset_id, table_id, col_name, term_id)
+        if cache_key in self._link_check_cache:
+            return self._link_check_cache[cache_key]
+
         client = dataplex_v1.CatalogServiceClient(credentials=get_credentials(self.project_id))
         
         # Consistent with apply_terms ID construction
@@ -83,9 +90,16 @@ class GlossaryPlugin(BasePlugin):
                 target_term_id = target_ref.name.split('/')[-1]
                 source_term_id = term_id.split('/')[-1]
                 if target_term_id == source_term_id:
+                    self._link_check_cache[cache_key] = True
                     return True
         except Exception:
+            # Fallback for UI-created links or restricted list permissions.
+            # If we had list_entry_links permissions, we'd use it here.
             pass
+        
+        # We return False if no direct deterministic link is found. 
+        # The caller (recommend_terms_for_table) will perform a strict similarity fallback.
+        self._link_check_cache[cache_key] = False
         return False
 
     def recommend_terms_for_table(self, dataset_id: str, table_id: str) -> pd.DataFrame:
@@ -124,11 +138,11 @@ class GlossaryPlugin(BasePlugin):
 
         # 3. Get Column Lineage (Upstream)
         
-        # Get Column Lineage (Upstream)
+        # Get Column Lineage (Upstream - Multi-hop)
         # Entry name for lineage is the BigQuery FQN: bigquery:project.dataset.table
         lineage_fqn = f"bigquery:{self.project_id}.{dataset_id}.{table_id}"
         col_list = [f.name for f in table.schema]
-        upstream_lineage = self._lineage_traverser.get_column_lineage(lineage_fqn, col_list)
+        upstream_lineage = self._lineage_traverser.get_recursive_column_lineage(lineage_fqn, col_list)
 
         # 4. Get Recommendations
         recommendations = []
@@ -139,29 +153,80 @@ class GlossaryPlugin(BasePlugin):
             
             # Recommendations will check for existing links using _check_link_exists
             
-            # A. Lineage-Based Recommendations
-            upstream = upstream_lineage.get(col_name)
-            if upstream:
-                src_entity = upstream['source_entity'] # project.dataset.table
-                src_col = upstream['source_column']
-                src_dataset = src_entity.split('.')[1]
-                src_table = src_entity.split('.')[2]
+            # A. Lineage-Based Recommendations (Multi-hop)
+            lineage_hops = upstream_lineage.get(col_name, [])
+            for hop in lineage_hops:
+                try:
+                    src_entity = hop['source_entity'] # expected project.dataset.table
+                    src_col = hop['source_column']
+                    hop_confidence = hop['confidence']
+                    
+                    # SEMANTIC GUARD: If this lineage link was penalized (e.g. Category vs Amount),
+                    # we do NOT want to propagate glossary terms through it, though it stays
+                    # for structural/description propagation.
+                    if hop.get('semantic_penalty'):
+                        continue
+                    
+                    # Robust parsing of project.dataset.table
+                    clean_entity = src_entity.replace("bigquery:", "")
+                    parts = clean_entity.split('.')
+                    if len(parts) >= 3:
+                        src_dataset = parts[-2]
+                        src_table = parts[-1]
 
-                # HEURISTIC: Check if any of our known terms are linked upstream to this column
-                # Since we can't list, we try a targeted check for all terms we found so far 
-                # or just look for the most likely matches.
-                # For now, we'll try to find any link matching our deterministic pattern
-                for term in all_terms:
-                    term_id = term['name']
-                    if self._check_link_exists(src_dataset, src_table, src_col, term_id):
-                        recommendations.append({
-                            "Column": col_name,
-                            "Suggested Term": term['display_name'],
-                            "Confidence": 1.0, # 1.0 confidence for lineage propagation
-                            "Rationale": f"Propagated via Lineage from {src_entity}",
-                            "Term ID": term_id 
-                        })
-                        break # Only propagate one term per column via lineage
+                        # ENRICHMENT: Fetch upstream column description to improve semantic matching
+                        src_description = ""
+                        try:
+                            src_table_ref = f"{self.project_id}.{src_dataset}.{src_table}"
+                            if not hasattr(self, '_table_cache'): self._table_cache = {}
+                            if src_table_ref not in self._table_cache:
+                                self._table_cache[src_table_ref] = self._bq_client.get_table(src_table_ref)
+                            
+                            target_field = next((f for f in self._table_cache[src_table_ref].schema if f.name == src_col), None)
+                            if target_field:
+                                src_description = target_field.description or ""
+                        except Exception:
+                            pass
+
+                        # HEURISTIC: Check if any of our known terms are linked upstream to this column
+                        for term in all_terms:
+                            term_id = term['name']
+                            found_link = self._check_link_exists(src_dataset, src_table, src_col, term_id)
+                            rationale = f"Propagated via Lineage from {src_entity}"
+                            
+                            # FALLBACK: If no direct link is detected (e.g., UI-created links),
+                            # we ONLY propagate if the term is an extremely strong match for the upstream column
+                            # (> 0.95), effectively a near-exact match. This prevents false positives
+                            # on columns that happen to have lineage but no actual term association.
+                            if not found_link:
+                                upstream_signals = self._similarity_engine.calculate_total_score(
+                                    {"name": src_col, "description": src_description, "type": ""}, 
+                                    term
+                                )
+                                
+                                # STRICT: Only use lineage rationale if it's almost certainly the same term link
+                                # or if the direct match is overwhelming.
+                                if upstream_signals['total'] >= 0.95:
+                                    found_link = True
+                                    rationale = f"Propagated via Lineage (Verified Link)"
+
+                            if found_link:
+                                # STRICT CONFIDENCE: Only promote to 1.0 if the lineage mapping itself is strong.
+                                # If the mapping is a weak heuristic (< 0.85), we treat it as moderate confidence.
+                                final_confidence = 1.0 if hop_confidence >= 0.85 else 0.7
+                                recommendations.append({
+                                    "Column": col_name,
+                                    "Suggested Term": term['display_name'],
+                                    "Confidence": final_confidence,
+                                    "Rationale": rationale,
+                                    "Term ID": term_id 
+                                })
+                                break # Found a term for this hop
+                        
+                        if recommendations and recommendations[-1]['Column'] == col_name:
+                            break # Already found a term for this column at some hop
+                except Exception as e:
+                    logger.warning(f"Failed to check upstream glossary links for {col_name} via {hop.get('source_entity')}: {e}")
 
             if recommendations and recommendations[-1]['Column'] == col_name:
                 # Found a lineage-based recommendation for this column!
@@ -350,5 +415,4 @@ class GlossaryPlugin(BasePlugin):
                         })
         
         return pd.DataFrame(gaps)
-
 

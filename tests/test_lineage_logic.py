@@ -39,8 +39,8 @@ class TestLineageLogic(unittest.TestCase):
         results = self.traverser.get_column_lineage("bigquery:proj.ds.target_table", ["quantity"])
         
         self.assertIn("quantity", results)
-        self.assertEqual(results["quantity"]["source_column"], "quantity")
-        self.assertEqual(results["quantity"]["confidence"], 1.0)
+        self.assertEqual(results["quantity"][0]["source_column"], "quantity")
+        self.assertEqual(results["quantity"][0]["confidence"], 1.0)
 
         # Test mapping for 'transaction_id' which might map to 'order_id' (no exact match but single link)
         # Reset mock for next call
@@ -55,8 +55,8 @@ class TestLineageLogic(unittest.TestCase):
             ]
         }
         results = self.traverser.get_column_lineage("bigquery:proj.ds.target_table", ["transaction_id"])
-        self.assertEqual(results["transaction_id"]["source_column"], "order_id")
-        self.assertEqual(results["transaction_id"]["confidence"], 0.7)
+        self.assertEqual(results["transaction_id"][0]["source_column"], "order_id")
+        self.assertEqual(results["transaction_id"][0]["confidence"], 0.7)
 
 if __name__ == '__main__':
     unittest.main()
