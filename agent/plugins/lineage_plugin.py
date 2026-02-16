@@ -159,14 +159,18 @@ class LineagePlugin(BasePlugin):
         table = client.get_table(table_ref)
         
         candidates = []
+        logger.info(f"--- Propagation Preview for {target_table} ---")
         for field in table.schema:
             if field.description:
+                logger.debug(f"Skipping column '{field.name}' - already has description.")
                 continue
                 
             # Recursive search for this column
+            logger.info(f"Searching source for column '{field.name}'...")
             match = self._find_description_recursive(target_fqn, field.name)
             
             if match:
+                logger.info(f"  [FOUND] Source: {match['source_entity']}.{match['source_column']} -> {match['description'][:40]}...")
                 # Enrich the found description using accumulated logic
                 enriched_desc = TransformationEnricher.enrich_description(
                     field.name, 
@@ -183,7 +187,11 @@ class LineagePlugin(BasePlugin):
                     "Proposed Description": enriched_desc,
                     "Type": f"Lineage (Hop {match['hop_depth']})" if match['hop_depth'] > 0 else "Lineage"
                 })
+            else:
+                logger.info(f"  [NOT FOUND] No source description found for '{field.name}'.")
 
+        if not candidates:
+            logger.warning(f"No propagation candidates found for {target_table}. (Missing desc count: {len([f for f in table.schema if not f.description])})")
         return pd.DataFrame(candidates)
 
     def get_lineage_summary(self, dataset_id: str, table_id: str) -> str:
@@ -247,12 +255,20 @@ class LineagePlugin(BasePlugin):
             summary += "*No downstream targets found via Data Lineage API.*\n"
             
         summary += f"\n**Propagation Potential:**\n"
+        all_columns = [f.name for f in table.schema]
         missing_desc = [f.name for f in table.schema if not f.description]
         potential_inherit = len([c for c in missing_desc if c in upstream_map])
         
-        summary += f"- {potential_inherit} missing columns can be enriched from upstream.\n"
-        if downstream_entities:
-            summary += f"- Metadata from this table can propagate to {len(downstream_entities)} downstream entities.\n"
+        logger.info(f"Summary for {table_id}: total={len(all_columns)}, missing={len(missing_desc)}, lineage_mapped={len(upstream_map)}, potential={potential_inherit}")
+        
+        if not missing_desc:
+            summary += f"✅ **This table is already fully documented in BigQuery.**\n"
+            if downstream_entities:
+                summary += f"- Metadata from this table is ready to propagate to **{len(downstream_entities)}** downstream entities.\n"
+        else:
+            summary += f"- {potential_inherit} missing columns can be enriched from upstream.\n"
+            if downstream_entities:
+                summary += f"- Metadata from this table can propagate to {len(downstream_entities)} downstream entities.\n"
             
         return summary
 

@@ -68,13 +68,21 @@ def scan_dataset(project_id, location, dataset_id, request: gr.Request = None):
         # 2. Scan for missing glossary terms
         glossary_df = glossary_plugin.scan_for_missing_glossary_terms(dataset_id)
         
-        # 3. Aggregate by Table for a cleaner UI
+        # 3. Calculate "Orphaned" Columns (No description AND no glossary term)
+        if not desc_df.empty and not glossary_df.empty:
+            orphans_df = pd.merge(desc_df, glossary_df, on=['Table', 'Column'], how='inner')
+        else:
+            orphans_df = pd.DataFrame(columns=['Table', 'Column'])
+        
+        # 4. Aggregate by Table for metrics
         desc_agg = desc_df.groupby('Table').size().reset_index(name='Missing Descriptions') if not desc_df.empty else pd.DataFrame(columns=['Table', 'Missing Descriptions'])
         gloss_agg = glossary_df.groupby('Table').size().reset_index(name='Missing Glossary Mappings') if not glossary_df.empty else pd.DataFrame(columns=['Table', 'Missing Glossary Mappings'])
-        
-        # 4. Generate Natural Language Summary
+        orphan_agg = orphans_df.groupby('Table').size().reset_index(name='Orphaned Columns') if not orphans_df.empty else pd.DataFrame(columns=['Table', 'Orphaned Columns'])
+
+        # 5. Summary and Metrics
         desc_count = len(desc_df)
         gloss_count = len(glossary_df)
+        orphan_count = len(orphans_df)
         
         if desc_count == 0 and gloss_count == 0:
             summary = "✅ **Metadata Estate is Complete!** All objects have both technical descriptions and business glossary mappings."
@@ -89,7 +97,7 @@ def scan_dataset(project_id, location, dataset_id, request: gr.Request = None):
             
             summary += "\n*Detailed column recommendations are available in the 'Description Propagation' and 'Glossary Recommendations' tabs.*"
 
-        return summary, desc_agg, gloss_agg
+        return summary, desc_agg, gloss_agg, orphan_agg, str(desc_count), str(gloss_count), str(orphan_count)
     except Exception as e:
         logger.error(f"Scan failed: {e}")
         raise gr.Error(f"Scan failed: {str(e)}")
@@ -109,8 +117,8 @@ def analyze_and_preview(project_id, location, dataset_id, target_table, request:
             gr.Warning(f"No upstream candidates found for {target_table}.")
             return summary, pd.DataFrame(columns=["Select", "Target Column", "Source", "Source Column", "Confidence", "Proposed Description", "Type"])
             
-        # Add selection column
-        df.insert(0, "Select", True)
+        # Add selection column - simple list assignment is safer for synchronization
+        df.insert(0, "Select", [True] * len(df))
         return summary, df
     except Exception as e:
         logger.error(f"Analyze & Preview failed: {e}")
@@ -127,7 +135,7 @@ def get_glossary_recommendations(project_id, location, dataset_id, table_id, req
             return pd.DataFrame(columns=["Select", "Column", "Suggested Term", "Confidence", "Rationale", "Term ID"])
         
         # Add selection column
-        df.insert(0, "Select", True)
+        df.insert(0, "Select", [True] * len(df))
         return df
     except Exception as e:
         logger.error(f"Glossary recommendations failed: {e}")
@@ -141,7 +149,11 @@ def apply_propagation_improved(project_id, location, dataset_id, target_table, c
             raise gr.Error("No candidates to apply.")
         
         # Filter selected rows
+        # Force 'Select' column to boolean to avoid string-mismatch in some versions/environments
+        candidates_df["Select"] = candidates_df["Select"].astype(bool)
         selected = candidates_df[candidates_df["Select"] == True]
+        logger.info(f"Applying propagation: {len(selected)} selected rows out of {len(candidates_df)}")
+        
         if selected.empty:
             gr.Warning("No columns selected for application.")
             return "No columns selected."
@@ -198,7 +210,10 @@ def apply_glossary_selections(project_id, location, dataset_id, table_id, reco_d
 def toggle_all_selection(df, value):
     """Universal helper to toggle a 'Select' column in a dataframe."""
     if df is not None and not df.empty:
-        df["Select"] = value
+        # Create a copy to ensure Gradio detects state change
+        df = df.copy()
+        df["Select"] = [bool(value)] * len(df)
+        logger.info(f"Toggled selection to: {value}")
     return df
 
 def select_all_lineage(df):
@@ -220,24 +235,206 @@ def check_auth_status(request: gr.Request):
     return gr.update(visible=True), gr.update(visible=False)
 
 
-with gr.Blocks(title="Agentic Data Steward") as demo:
+# --- Custom Google Cloud Console Styling ---
+# We inject this via gr.HTML to ensure it overrides Gradio's internal CSS
+GCP_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+
+/* --- Global Overrides --- */
+* {
+    font-family: 'Roboto', sans-serif !important;
+}
+
+body, .gradio-container, .dark, .dark .gradio-container {
+    background-color: #f8f9fa !important;
+    background: #f8f9fa !important;
+}
+
+/* --- Remove ALL Gradio Orange/Black/Low-Contrast --- */
+:root, .gradio-container, body, .dark, .dark :root {
+    --primary-50: #e8f0fe !important;
+    --primary-500: #1a73e8 !important;
+    --secondary-500: #1a73e8 !important;
+    --accent-500: #1a73e8 !important;
+    --body-background-fill: #f8f9fa !important;
+    --block-background-fill: #ffffff !important;
+    --block-border-color: #dadce0 !important;
+    --body-text-color: #202124 !important;
+    --block-label-text-color: #202124 !important;
+    --input-text-color: #202124 !important;
+    --button-primary-text-color: #ffffff !important;
+    --button-secondary-text-color: #202124 !important;
+    --background-fill-primary: #ffffff !important;
+    --background-fill-secondary: #f8f9fa !important;
+}
+
+/* Ensure text readability on main containers */
+body, .gradio-container, p {
+    color: #202124 !important;
+}
+
+/* Specific enforcement for Primary Buttons - White Text on Blue */
+/* Nuclear selector for any button that looks primary */
+.primary, .gr-button-primary, button.primary, .lg.primary, .sm.primary,
+button[variant="primary"], .gr-button-primary *, button.primary *,
+.gradio-container button.primary, .gradio-container .primary {
+    color: #ffffff !important;
+    fill: #ffffff !important;
+    background-color: #1a73e8 !important;
+}
+
+/* Force white text on the specific button content */
+.primary span, .gr-button-primary span, button.primary span,
+.primary div, .gr-button-primary div, button.primary div {
+    color: #ffffff !important;
+}
+
+.primary:hover, .gr-button-primary:hover, button.primary:hover {
+    background-color: #1765cc !important;
+    color: #ffffff !important;
+}
+
+/* Secondary Buttons - Dark Text on Light Grey */
+.gr-button-secondary, .gr-button-secondary *, button.secondary, button.secondary * {
+    color: #202124 !important;
+    background-color: #f1f3f4 !important;
+    border: 1px solid #dadce0 !important;
+}
+
+/* Fix Input Field & Label Visibility */
+input, textarea, select, .gr-input, .gr-box, .gr-textbox input, .gr-textbox textarea {
+    background-color: white !important;
+    color: #202124 !important;
+    border: 1px solid #dadce0 !important;
+}
+
+/* Force dark labels for all input fields */
+.gr-label, .block label, span[data-testid="block-info"], .gr-form label, .desc-markdown p {
+    color: #202124 !important;
+    font-weight: 500 !important;
+    font-size: 13px !important;
+}
+
+/* --- Table (Dataframe) Force Light Headers & Cells --- */
+/* Target EVERYTHING related to tables to ensure no dark leaks */
+.gr-table, .gr-table-container, table, .dataframe, thead, tbody, tr, th, td {
+    background-color: #ffffff !important;
+    background: #ffffff !important;
+    color: #202124 !important;
+    border-color: #e0e0e0 !important;
+}
+
+/* Specific Header Styling - BLUE BACKGROUND / WHITE TEXT */
+th, thead th, .gr-table thead th, .dataframe thead th, 
+.gr-table th, .dataframe th, [class*="thead"] th,
+.dark th, .dark thead th, .dark .gr-table th {
+    background-color: #1a73e8 !important;
+    background: #1a73e8 !important;
+    color: #ffffff !important;
+    font-weight: 500 !important;
+    text-transform: uppercase !important;
+    font-size: 11px !important;
+    border-bottom: 2px solid #1557b0 !important;
+    padding: 12px 8px !important;
+}
+
+/* Force white text in all header children specifically, prioritizing text-bearing elements */
+th span, th div, .gr-table th span, .gr-table th div,
+.dataframe th span, .dataframe th div {
+    color: #ffffff !important;
+}
+
+/* Force text color in all table cells (excluding headers) */
+tbody td, .dark tbody td, tbody td span, tbody td div {
+    color: #202124 !important;
+}
+
+/* Ensure checkboxes are visible and interactive */
+input[type="checkbox"] {
+    cursor: pointer !important;
+    appearance: checkbox !important;
+    accent-color: #1a73e8 !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+}
+
+/* Target row background specifically to avoid stripes being dark */
+tr, .gr-table tr, .dataframe tr {
+    background-color: #ffffff !important;
+}
+
+/* Fix black background boxes in Lineage Summary / Markdown */
+.markdown code, .prose code, .markdown span, .prose span {
+    background-color: rgba(0,0,0,0.05) !important;
+    color: #202124 !important;
+    padding: 2px 4px !important;
+    border-radius: 4px !important;
+}
+
+/* Ensure generic black boxes (like those in lineage summary) are forced light */
+[style*="background-color: black"], [style*="background: black"], .bg-black {
+    background-color: #f1f3f4 !important;
+    color: #202124 !important;
+}
+
+/* Tab Active Highlights */
+.tabs .tabitem.selected, .tabs button.selected {
+    border-bottom: 3px solid #1a73e8 !important;
+    color: #1a73e8 !important;
+    background: transparent !important;
+}
+
+.tabs button {
+    color: #5f6368 !important;
+    border-bottom: 1px solid transparent !important;
+}
+
+.gcp-card {
+    background: white !important;
+    border: 1px solid #dadce0 !important;
+    box-shadow: none !important;
+}
+
+/* Metric Cards */
+.gcp-metric-card {
+    background: white !important;
+    border: 1px solid #dadce0 !important;
+    border-radius: 8px !important;
+    padding: 24px 16px !important;
+    text-align: center !important;
+}
+
+.gcp-metric-value {
+    color: #1a73e8 !important;
+    font-size: 36px !important;
+    font-weight: 500 !important;
+}
+
+.gcp-metric-label {
+    color: #5f6368 !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    text-transform: uppercase !important;
+}
+</style>
+"""
+
+with gr.Blocks(title="Dataplex Data Steward") as demo:
+    # Force Inject CSS
+    gr.HTML(GCP_CSS)
+    
+    # App Content
+    
     # 1. Login View
     with gr.Column(visible=True) as login_view:
-        gr.Markdown("# 🛡️ Agentic Data Steward")
-        gr.Markdown("Please log in with your Google account to access the governance tools.")
-        login_html = """
-        <a href="/google_login" style="
-            display: inline-block;
-            background-color: #4285F4;
-            color: white;
-            padding: 10px 24px;
-            text-decoration: none;
-            border-radius: 4px;
-            font-family: 'Roboto', sans-serif;
-            font-weight: 500;
-        ">Login with Google</a>
-        """
-        gr.HTML(login_html)
+        with gr.Column(elem_classes=["gcp-card"]):
+            gr.Markdown("# Welcome to Dataplex Data Steward")
+            gr.Markdown("Proactively manage your metadata and governance at scale.")
+            login_btn = gr.Button("Login with Google", variant="primary", elem_classes=["gr-button-primary"])
+            login_btn.click(lambda: gr.Info("Redirecting to Google Login..."), None, None).then(
+                fn=None, js="() => window.location.href='/google_login'"
+            )
 
     # 2. Main App View
     with gr.Column(visible=False) as app_view:
@@ -255,41 +452,69 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
     
     with gr.Tabs():
         with gr.TabItem("Dashboard"):
-            gr.Markdown("## 📋 Data Estate Overview")
-            with gr.Group():
+            with gr.Column(elem_classes=["gcp-card"]):
+                gr.Markdown("## 📋 Data Estate Governance")
+                with gr.Group():
+                    with gr.Row():
+                        global_dataset = gr.Textbox(
+                            label="Active Dataset ID", 
+                            value=DEFAULT_DATASET_ID,
+                            placeholder="e.g. retail_synthetic_data",
+                            info="Select a dataset to scan for gaps in descriptions and glossary mappings."
+                        )
+                
                 with gr.Row():
-                    global_dataset = gr.Textbox(
-                        label="Active Dataset ID", 
-                        value=DEFAULT_DATASET_ID,
-                        placeholder="e.g. retail_synthetic_data",
-                        info="This dataset will be used across all tabs."
-                    )
+                    scan_btn = gr.Button("Analyze Governance Health", variant="primary", elem_classes=["gr-button-primary"])
+                
+                dash_summary = gr.Markdown("Enter a dataset and click 'Analyze' to view the current governance state.")
             
-            gr.Markdown("---")
-            gr.Markdown("### 🔍 Metadata Completeness Scan")
+            # Metric Row
             with gr.Row():
-                scan_btn = gr.Button("Scan Dataset", variant="secondary")
-            
-            dash_summary = gr.Markdown("Click 'Scan Dataset' to analyze metadata completeness.")
-            
+                with gr.Column(elem_classes=["gcp-metric-card"]):
+                    desc_metric = gr.HTML("<div class='gcp-metric-value'>-</div><div class='gcp-metric-label'>Description Gaps</div>")
+                with gr.Column(elem_classes=["gcp-metric-card"]):
+                    gloss_metric = gr.HTML("<div class='gcp-metric-value'>-</div><div class='gcp-metric-label'>Glossary Gaps</div>")
+                with gr.Column(elem_classes=["gcp-metric-card"]):
+                    orphan_metric = gr.HTML("<div class='gcp-metric-value'>-</div><div class='gcp-metric-label'>Orphaned Columns</div>")
+
             with gr.Row():
-                with gr.Column():
+                with gr.Column(elem_classes=["gcp-card"]):
+                    gr.Markdown("### 🔍 Technical Description Gaps")
                     desc_output = gr.Dataframe(
-                        label="❌ Missing Technical Descriptions",
+                        headers=["Table", "Missing Descriptions"],
                         interactive=False,
                         wrap=True
                     )
-                with gr.Column():
+                with gr.Column(elem_classes=["gcp-card"]):
+                    gr.Markdown("### 📖 Business Glossary Gaps")
                     glossary_gap_output = gr.Dataframe(
-                        label="❌ Missing Glossary Mappings",
+                        headers=["Table", "Missing Glossary Mappings"],
+                        interactive=False,
+                        wrap=True
+                    )
+                with gr.Column(elem_classes=["gcp-card"]):
+                    gr.Markdown("### ⚠️ Orphaned Assets")
+                    gr.Markdown("<small>Columns missing both description and glossary mapping.</small>")
+                    orphan_output = gr.Dataframe(
+                        headers=["Table", "Orphaned Columns"],
                         interactive=False,
                         wrap=True
                     )
             
+            def dashboard_scan_wrapper(project, loc, ds, request: gr.Request):
+                summary, d_agg, g_agg, o_agg, d_cnt, g_cnt, o_cnt = scan_dataset(project, loc, ds, request)
+                
+                # Format metrics
+                d_html = f"<div class='gcp-metric-value'>{d_cnt}</div><div class='gcp-metric-label'>Description Gaps</div>"
+                g_html = f"<div class='gcp-metric-value'>{g_cnt}</div><div class='gcp-metric-label'>Glossary Gaps</div>"
+                o_html = f"<div class='gcp-metric-value'>{o_cnt}</div><div class='gcp-metric-label'>Orphaned Columns</div>"
+                
+                return summary, d_agg, g_agg, o_agg, d_html, g_html, o_html
+
             scan_btn.click(
-                scan_dataset, 
+                dashboard_scan_wrapper, 
                 inputs=[config_project, config_location, global_dataset], 
-                outputs=[dash_summary, desc_output, glossary_gap_output]
+                outputs=[dash_summary, desc_output, glossary_gap_output, orphan_output, desc_metric, gloss_metric, orphan_metric]
             )
 
         with gr.TabItem("Description Propagation"):
@@ -315,7 +540,24 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
             with gr.Row():
                 apply_btn = gr.Button("Apply Selection to BigQuery", variant="primary")
             
-            apply_result = gr.Textbox(label="Apply Status", interactive=False)
+            with gr.Column(elem_classes=["gcp-card"]):
+                summary_output = gr.Markdown("Enter a table and click the button above to start analysis.")
+                gr.Markdown("*(Optional: Click any cell in the **Proposed Description** column to refine it before applying)*")
+                preview_output = gr.Dataframe(
+                    label="Propagation Candidates", 
+                    interactive=True, 
+                    wrap=True,
+                    datatype=["bool", "str", "str", "str", "number", "str", "str"]
+                )
+                
+                with gr.Row():
+                    select_all_lineage_btn = gr.Button("Select All", size="sm", elem_classes=["gr-button-secondary"])
+                    deselect_all_lineage_btn = gr.Button("Deselect All", size="sm", elem_classes=["gr-button-secondary"])
+                
+                with gr.Row():
+                    apply_btn = gr.Button("Apply Selection to BigQuery", variant="primary", elem_classes=["gr-button-primary"])
+                
+                apply_result = gr.Textbox(label="Apply Status", interactive=False)
 
             select_all_lineage_btn.click(select_all_lineage, inputs=[preview_output], outputs=[preview_output])
             deselect_all_lineage_btn.click(deselect_all_lineage, inputs=[preview_output], outputs=[preview_output])
@@ -334,29 +576,31 @@ with gr.Blocks(title="Agentic Data Steward") as demo:
             )
 
         with gr.TabItem("Glossary Recommendations"):
-            gr.Markdown("## 📖 Business Glossary Mapping")
-            gr.Markdown("Recommends mappings of columns to business glossary terms across tables.")
+            with gr.Column(elem_classes=["gcp-card"]):
+                gr.Markdown("## 📖 Business Glossary Mapping")
+                gr.Markdown("Recommends mappings of columns to business glossary terms across tables.")
+                
+                with gr.Row():
+                    glossary_table = gr.Textbox(label="Target Table", value="customers")
+                
+                recommend_btn = gr.Button("Get Glossary Recommendations", variant="primary", elem_classes=["gr-button-primary"])
             
-            with gr.Row():
-                glossary_table = gr.Textbox(label="Target Table", value="customers")
-            
-            recommend_btn = gr.Button("Get Glossary Recommendations", variant="primary")
-            
-            recommendations_view = gr.Dataframe(
-                label="Glossary Recommendations (Select to apply)",
-                interactive=True,
-                wrap=True,
-                datatype=["bool", "str", "str", "number", "str", "str"]
-            )
-            
-            with gr.Row():
-                select_all_glossary_btn = gr.Button("Select All", size="sm")
-                deselect_all_glossary_btn = gr.Button("Deselect All", size="sm")
-            
-            with gr.Row():
-                apply_glossary_btn = gr.Button("Apply Selected Terms to Dataplex", variant="primary")
-            
-            glossary_apply_result = gr.Textbox(label="Apply Status", interactive=False)
+            with gr.Column(elem_classes=["gcp-card"]):
+                recommendations_view = gr.Dataframe(
+                    label="Glossary Recommendations",
+                    interactive=True,
+                    wrap=True,
+                    datatype=["bool", "str", "str", "number", "str", "str"]
+                )
+                
+                with gr.Row():
+                    select_all_glossary_btn = gr.Button("Select All", size="sm", elem_classes=["gr-button-secondary"])
+                    deselect_all_glossary_btn = gr.Button("Deselect All", size="sm", elem_classes=["gr-button-secondary"])
+                
+                with gr.Row():
+                    apply_glossary_btn = gr.Button("Apply Selected Terms to Dataplex", variant="primary", elem_classes=["gr-button-primary"])
+                
+                glossary_apply_result = gr.Textbox(label="Apply Status", interactive=False)
 
             select_all_glossary_btn.click(select_all_glossary, inputs=[recommendations_view], outputs=[recommendations_view])
             deselect_all_glossary_btn.click(deselect_all_glossary, inputs=[recommendations_view], outputs=[recommendations_view])
