@@ -16,3 +16,4 @@ google-cloud-datacatalog-lineage
 google-cloud-datacatalog
 google-cloud-aiplatform
 google-genai
+google-cloud-bigquery-datapolicies

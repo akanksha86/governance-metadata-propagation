@@ -1,0 +1,294 @@
+import sys
+import os
+import logging
+import pandas as pd
+from typing import List, Dict, Any, Optional
+
+# Add adk_integration and dataplex_integration to relative path for plugin execution
+PLUGIN_DIR = os.path.dirname(__file__)
+sys.path.append(os.path.abspath(os.path.join(PLUGIN_DIR, '../adk_integration')))
+sys.path.append(os.path.abspath(os.path.join(PLUGIN_DIR, '../../dataplex_integration')))
+
+from google.adk.plugins.base_plugin import BasePlugin
+from google.cloud import bigquery, datacatalog_v1, bigquery_datapolicies_v1
+from google.iam.v1 import policy_pb2, iam_policy_pb2
+from context import get_credentials, get_oauth_token
+from lineage_propagation import LineageGraphTraverser, TransformationEnricher, SQLFetcher
+
+logger = logging.getLogger(__name__)
+
+class PolicyTagPlugin(BasePlugin):
+    def __init__(self, project_id: str, location: str = "europe-west1"):
+        super().__init__(name="policy_tag_plugin")
+        self.project_id = project_id
+        self.location = location
+        self._lineage_traverser = None
+        self._sql_fetcher = None
+        self._pt_client = None
+        self._dp_client = None
+
+    def _get_credentials(self):
+        return get_credentials(self.project_id)
+
+    def _get_bq_client(self):
+        creds = self._get_credentials()
+        return bigquery.Client(project=self.project_id, credentials=creds)
+
+    def _get_pt_client(self):
+        creds = self._get_credentials()
+        return datacatalog_v1.PolicyTagManagerClient(credentials=creds)
+
+    def _get_dp_client(self):
+        creds = self._get_credentials()
+        return bigquery_datapolicies_v1.DataPolicyServiceClient(credentials=creds)
+
+    def _ensure_initialized(self):
+        creds = self._get_credentials()
+        token = get_oauth_token()
+        
+        if not self._lineage_traverser:
+            self._lineage_traverser = LineageGraphTraverser(self.project_id, self.location, token=token)
+            
+        if not self._sql_fetcher:
+            self._sql_fetcher = SQLFetcher(self.project_id, self.location, credentials=creds)
+            
+        if not self._pt_client:
+            self._pt_client = self._get_pt_client()
+
+        if not self._dp_client:
+            self._dp_client = self._get_dp_client()
+
+    def scan_for_policy_tags(self, dataset_id: str) -> pd.DataFrame:
+        """
+        Scans a dataset for tables/columns with policy tags.
+        """
+        self._ensure_initialized()
+        client = self._get_bq_client()
+        dataset_ref = f"{self.project_id}.{dataset_id}"
+        
+        tables = list(client.list_tables(dataset_ref))
+        policy_tags_data = []
+
+        for table_item in tables:
+            table_ref = f"{dataset_ref}.{table_item.table_id}"
+            try:
+                table = client.get_table(table_ref)
+                for field in table.schema:
+                    if field.policy_tags:
+                        policy_tags_data.append({
+                            "Table": table_item.table_id,
+                            "Column": field.name,
+                            "Policy Tags": ", ".join(field.policy_tags.names)
+                        })
+            except Exception as e:
+                logger.error(f"Error accessing {table_ref}: {e}")
+
+        return pd.DataFrame(policy_tags_data)
+
+    def preview_policy_tag_propagation(self, dataset_id: str, target_table: str) -> pd.DataFrame:
+        """
+        Recommends policy tag propagation based on lineage.
+        """
+        self._ensure_initialized()
+        target_fqn = f"bigquery:{self.project_id}.{dataset_id}.{target_table}"
+        client = self._get_bq_client()
+        table_ref = f"{self.project_id}.{dataset_id}.{target_table}"
+        table = client.get_table(table_ref)
+        
+        recommendations = []
+        
+        for field in table.schema:
+            # We check even if it already has a policy tag, to see if it matches or needs update
+            # But usually we look for missing ones.
+            
+            logger.info(f"Searching source for column '{field.name}'...")
+            # For policy tags, we might only care about direct upstream or a few hops
+            lineage = self._lineage_traverser.get_column_lineage(target_fqn, [field.name], depth=0)
+            sources = lineage.get(field.name, [])
+            
+            if not sources:
+                continue
+                
+            for source in sources:
+                src_entity = source['source_entity']
+                src_col = source['source_column']
+                
+                try:
+                    src_table = client.get_table(src_entity)
+                    for src_field in src_table.schema:
+                        if src_field.name == src_col and src_field.policy_tags:
+                            # Found a source with policy tags
+                            
+                            # Check for transformation
+                            is_straight_pull = (src_col == field.name)
+                            logic = None
+                            try:
+                                sql = self._sql_fetcher.get_transformation_sql(dataset_id, target_table)
+                                if sql:
+                                    logic = TransformationEnricher.extract_column_logic(sql, field.name)
+                                    if logic and logic.strip() != src_col and logic.strip() != f"`{src_col}`":
+                                        is_straight_pull = False
+                            except Exception as e:
+                                logger.debug(f"SQL check failed: {e}")
+
+                            recommendation = "Propagate" if is_straight_pull else "Review Required (Transformed)"
+                            
+                            # Check if the target field already has this tag
+                            src_tag_names = src_field.policy_tags.names
+                            if field.policy_tags and set(src_tag_names).issubset(set(field.policy_tags.names)):
+                                logger.info(f"Skipping recommendation for {field.name} - tag already applied.")
+                                continue
+
+                            # Fetch access summary
+                            reader_count = self.get_policy_tag_reader_count(src_tag_names[0]) if src_tag_names else 0
+                            masking_count = self.get_policy_tag_data_policy_count(src_tag_names[0]) if src_tag_names else 0
+
+                            recommendations.append({
+                                "Target Column": field.name,
+                                "Source Table": src_entity,
+                                "Source Column": src_col,
+                                "Policy Tags": ", ".join(src_tag_names),
+                                "Recommendation": recommendation,
+                                "Logic": logic or "Straight Pull",
+                                "Access Summary": f"{reader_count} Readers, {masking_count} Masking Policies"
+                            })
+                except Exception as e:
+                    logger.warning(f"Failed to check source {src_entity}: {e}")
+
+        return pd.DataFrame(recommendations)
+
+    def get_policy_tag_reader_count(self, policy_tag_id: str) -> int:
+        """Counts members with FineGrainedReader role on a policy tag."""
+        self._ensure_initialized()
+        try:
+            request = iam_policy_pb2.GetIamPolicyRequest(resource=policy_tag_id)
+            policy = self._pt_client.get_iam_policy(request=request)
+            
+            readers = set()
+            for binding in policy.bindings:
+                if binding.role == "roles/datacatalog.categoryFineGrainedReader":
+                    readers.update(binding.members)
+            return len(readers)
+        except Exception as e:
+            logger.error(f"Failed to count readers for {policy_tag_id}: {e}")
+            return 0
+
+    def get_policy_tag_data_policy_count(self, policy_tag_id: str) -> int:
+        """Counts BigQuery Data Policies associated with a policy tag."""
+        self._ensure_initialized()
+        try:
+            # We need to list data policies in the location and filter by policy tag
+            # Format: projects/{project}/locations/{location}
+            parent = f"projects/{self.project_id}/locations/{self.location}"
+            request = bigquery_datapolicies_v1.ListDataPoliciesRequest(parent=parent)
+            page_result = self._dp_client.list_data_policies(request=request)
+            
+            count = 0
+            # Normalize target tag ID for comparison (locations/...)
+            target_suffix = "/".join(policy_tag_id.split("/")[2:]) if "/" in policy_tag_id else policy_tag_id
+            
+            for response in page_result:
+                # Normalize response tag ID
+                res_suffix = "/".join(response.policy_tag.split("/")[2:]) if "/" in response.policy_tag else response.policy_tag
+                
+                if res_suffix == target_suffix:
+                    count += 1
+            
+            return count
+        except Exception as e:
+            logger.error(f"Failed to count data policies for {policy_tag_id}: {e}")
+            return 0
+
+    def get_policy_tag_readers(self, policy_tag_id: str) -> List[str]:
+        """Retrieves members with FineGrainedReader role on a policy tag."""
+        self._ensure_initialized()
+        try:
+            request = iam_policy_pb2.GetIamPolicyRequest(resource=policy_tag_id)
+            policy = self._pt_client.get_iam_policy(request=request)
+            
+            readers = []
+            for binding in policy.bindings:
+                if binding.role == "roles/datacatalog.categoryFineGrainedReader":
+                    readers.extend(binding.members)
+            return readers
+        except Exception as e:
+            logger.error(f"Failed to get IAM policy for {policy_tag_id}: {e}")
+            return []
+
+    def set_policy_tag_readers(self, policy_tag_id: str, new_readers: List[str]):
+        """Adds members to FineGrainedReader role on a policy tag."""
+        self._ensure_initialized()
+        try:
+            get_request = iam_policy_pb2.GetIamPolicyRequest(resource=policy_tag_id)
+            policy = self._pt_client.get_iam_policy(request=get_request)
+            
+            # Find or create binding for FineGrainedReader
+            found = False
+            for binding in policy.bindings:
+                if binding.role == "roles/datacatalog.categoryFineGrainedReader":
+                    # Add only new members
+                    existing = set(binding.members)
+                    for m in new_readers:
+                        if m not in existing:
+                            binding.members.append(m)
+                    found = True
+                    break
+            
+            if not found:
+                new_binding = policy.bindings.add()
+                new_binding.role = "roles/datacatalog.categoryFineGrainedReader"
+                new_binding.members.extend(new_readers)
+            
+            set_request = iam_policy_pb2.SetIamPolicyRequest(resource=policy_tag_id, policy=policy)
+            self._pt_client.set_iam_policy(request=set_request)
+            logger.info(f"Successfully updated IAM policy for {policy_tag_id}")
+        except Exception as e:
+            logger.error(f"Failed to set IAM policy for {policy_tag_id}: {e}")
+            raise
+
+    def apply_policy_tags(self, dataset_id: str, updates: List[Dict[str, str]]):
+        """
+        Applies policy tags to specified columns.
+        updates: List of dicts with keys 'table', 'column', 'policy_tag'
+        """
+        self._ensure_initialized()
+        client = self._get_bq_client()
+        
+        for update in updates:
+            table_id = update['table']
+            col_name = update['column']
+            tag_name = update['policy_tag']
+            
+            table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
+            try:
+                table = client.get_table(table_ref)
+                
+                new_schema = []
+                found = False
+                for field in table.schema:
+                    if field.name == col_name:
+                        field_dict = field.to_api_repr()
+                        field_dict['policyTags'] = {'names': [tag_name]}
+                        new_schema.append(bigquery.SchemaField.from_api_repr(field_dict))
+                        found = True
+                    else:
+                        new_schema.append(field)
+                
+                if found:
+                    table.schema = new_schema
+                    client.update_table(table, ["schema"])
+                    logger.info(f"Successfully applied policy tag to {table_id}.{col_name}")
+                    
+                    # Handle Access Propagation / Providing Access
+                    readers = update.get('readers', [])
+                    if isinstance(readers, str):
+                        readers = [r.strip() for r in readers.split(",") if r.strip()]
+                    
+                    if readers:
+                        logger.info(f"Applying IAM readers to tag {tag_name}: {readers}")
+                        self.set_policy_tag_readers(tag_name, readers)
+                        
+                else:
+                    logger.warning(f"Column {col_name} not found in {table_id}")
+            except Exception as e:
+                logger.error(f"Failed to apply policy tag to {table_ref}.{col_name}: {e}", exc_info=True)

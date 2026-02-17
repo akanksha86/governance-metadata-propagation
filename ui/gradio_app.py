@@ -32,6 +32,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../agen
 # Import Agent Components
 from lineage_plugin import LineagePlugin
 from glossary_plugin import GlossaryPlugin
+from policy_tag_plugin import PolicyTagPlugin
 from context import set_oauth_token
 
 # Configure Logging
@@ -141,6 +142,63 @@ def get_glossary_recommendations(project_id, location, dataset_id, table_id, req
         logger.error(f"Glossary recommendations failed: {e}")
         raise gr.Error(f"Operation failed: {str(e)}")
 
+def get_policy_tag_recommendations(project_id, location, dataset_id, table_id, request: gr.Request = None):
+    token = get_token_from_session(request)
+    set_oauth_token(token)
+    try:
+        plugin = PolicyTagPlugin(project_id, location)
+        df = plugin.preview_policy_tag_propagation(dataset_id, table_id)
+        if df.empty:
+            gr.Info(f"No policy tag recommendations found for {table_id}.")
+            return pd.DataFrame(columns=["Select", "Target Column", "Source Table", "Policy Tags", "Recommendation", "Logic", "Access Summary"])
+        
+        # Add selection column
+        df.insert(0, "Select", [True] * len(df))
+        return df
+    except Exception as e:
+        logger.error(f"Policy tag recommendations failed: {e}")
+        raise gr.Error(f"Operation failed: {str(e)}")
+
+def apply_policy_tag_recommendations(project_id, location, dataset_id, target_table, recommendations_df, additional_readers, request: gr.Request = None):
+    token = get_token_from_session(request)
+    set_oauth_token(token)
+    try:
+        if recommendations_df is None or recommendations_df.empty:
+            raise gr.Error("No recommendations to apply.")
+        
+        # Filter selected rows
+        recommendations_df["Select"] = recommendations_df["Select"].astype(bool)
+        selected = recommendations_df[recommendations_df["Select"] == True]
+        
+        if selected.empty:
+            gr.Warning("No columns selected for application.")
+            return "No columns selected."
+            
+        plugin = PolicyTagPlugin(project_id, location)
+        updates = []
+        for _, row in selected.iterrows():
+            update = {
+                "table": target_table,
+                "column": row['Target Column'],
+                "policy_tag": row['Policy Tags'].split(", ")[0]
+            }
+            
+            # Aggregate readers (only additional readers now, as source readers are handled as a summary)
+            all_readers = []
+            if additional_readers:
+                all_readers.extend([r.strip() for r in additional_readers.split(",") if r.strip()])
+            
+            if all_readers:
+                update["readers"] = list(set(all_readers))
+                
+            updates.append(update)
+            
+        plugin.apply_policy_tags(dataset_id, updates)
+        return f"Successfully applied {len(updates)} policy tags to {target_table}!"
+    except Exception as e:
+        logger.error(f"Policy tag apply failed: {e}")
+        raise gr.Error(f"Apply failed: {str(e)}")
+
 def apply_propagation_improved(project_id, location, dataset_id, target_table, candidates_df, request: gr.Request = None):
     token = get_token_from_session(request)
     set_oauth_token(token)
@@ -226,6 +284,12 @@ def select_all_glossary(df):
     return toggle_all_selection(df, True)
 
 def deselect_all_glossary(df):
+    return toggle_all_selection(df, False)
+
+def select_all_policy(df):
+    return toggle_all_selection(df, True)
+
+def deselect_all_policy(df):
     return toggle_all_selection(df, False)
 
 def check_auth_status(request: gr.Request):
@@ -603,6 +667,53 @@ with gr.Blocks(title="Dataplex Data Steward") as demo:
                 outputs=glossary_apply_result
             )
 
+        with gr.TabItem("Policy Tag Propagation"):
+            with gr.Column(elem_classes=["gcp-card"]):
+                gr.Markdown("## 🛡️ Policy Tag Propagation")
+                gr.Markdown("Recommends propagating policy tags based on lineage and transformation assessment.")
+                
+                with gr.Row():
+                    policy_table = gr.Textbox(label="Target Table", value="customers")
+                
+                policy_recommend_btn = gr.Button("Get Policy Tag Recommendations", variant="primary", elem_classes=["gr-button-primary"])
+            
+            with gr.Column(elem_classes=["gcp-card"]):
+                policy_recommendations_view = gr.Dataframe(
+                    label="Policy Tag Recommendations",
+                    interactive=True,
+                    wrap=True,
+                    datatype=["bool", "str", "str", "str", "str", "str", "str"]
+                )
+                
+                with gr.Row():
+                    additional_readers_txt = gr.Textbox(label="Additional Readers to add (Comma separated)", placeholder="group:data-scientists@example.com, user:analyst@example.com")
+                
+                with gr.Row():
+                    select_all_policy_btn = gr.Button("Select All", size="sm", elem_classes=["gr-button-secondary"])
+                    deselect_all_policy_btn = gr.Button("Deselect All", size="sm", elem_classes=["gr-button-secondary"])
+                
+                with gr.Row():
+                    apply_policy_btn = gr.Button("Apply Selected Tags to BigQuery", variant="primary", elem_classes=["gr-button-primary"])
+                
+                policy_apply_result = gr.Textbox(label="Apply Status", interactive=False)
+
+            select_all_policy_btn.click(select_all_policy, inputs=[policy_recommendations_view], outputs=[policy_recommendations_view])
+            deselect_all_policy_btn.click(deselect_all_policy, inputs=[policy_recommendations_view], outputs=[policy_recommendations_view])
+            
+            policy_recommend_btn.click(
+                lambda: "", outputs=[policy_apply_result]
+            ).then(
+                get_policy_tag_recommendations,
+                inputs=[config_project, config_location, global_dataset, policy_table],
+                outputs=policy_recommendations_view
+            )
+
+            apply_policy_btn.click(
+                apply_policy_tag_recommendations,
+                inputs=[config_project, config_location, global_dataset, policy_table, policy_recommendations_view, additional_readers_txt],
+                outputs=policy_apply_result
+            )
+
     # Auth logic: Show info on load if already logged in
     demo.load(check_auth_status, outputs=[login_view, app_view])
 
@@ -610,8 +721,8 @@ if __name__ == "__main__":
     from fastapi import FastAPI
     main_app = FastAPI()
     
-    # Add Session Middleware
-    main_app.add_middleware(SessionMiddleware, secret_key="some-secret-key-for-auth-propagation")
+    # Add Session Middleware with a custom cookie name to prevent collisions
+    main_app.add_middleware(SessionMiddleware, secret_key="some-secret-key-for-auth-propagation", session_cookie="steward_session")
 
     @main_app.get("/google_login")
     async def login(request: fastapi.Request):
@@ -624,9 +735,8 @@ if __name__ == "__main__":
     @main_app.get("/google_callback")
     async def auth_callback(request: fastapi.Request):
         try:
-            # Explicitly pass redirect_uri to match what was sent during authorization
-            redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:7860/google_callback")
-            token = await oauth_config.google.authorize_access_token(request, redirect_uri=redirect_uri)
+            # Removed explicit redirect_uri to prevent "multiple values" error
+            token = await oauth_config.google.authorize_access_token(request)
             request.session["google_token"] = token
             logger.info("Successfully received token and stored in session.")
             return RedirectResponse(url="/")

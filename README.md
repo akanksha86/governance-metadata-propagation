@@ -13,6 +13,7 @@ This project demonstrates an agentic data governance solution using Google Cloud
 *   **Prioritized Lineage Propagation**: Automatically propagates glossary terms across tables based on lineage, with strict verification thresholds to ensure accuracy (especially for 1-1 mappings).
 *   **Native Dataplex Integration**: Persists glossary mappings as native `EntryLinks` visible in the Dataplex Schema tab.
 *   **Unified UI & CLI**: Manage governance tasks via a Gradio-based web app or a headless CLI.
+*   **Policy Tag Propagation**: Recommends and applies BigQuery policy tags via lineage, with support for "straight pull" detection and an integrated **Access Summary** (Readers & Data Policies).
 *   **CLL API Preview allowlisting required**: Please contact your Google Cloud account team to get access to CLL API
 
 ---
@@ -51,6 +52,7 @@ python3 ui/gradio_app.py
 ```
 - **Dashboard**: Run "Scan Dataset" to see health metrics.
 - **Description Propagation**: Enter a table name to preview and apply lineage-based descriptions.
+- **Policy Tag Propagation**: Propagate sensitive data tags across the lineage chain with automated transformation assessment.
 - **Settings**: Toggle OAuth/ADC modes for specific user actions.
 
 ### 3. 🐳 Deployment (Docker & Cloud Run)
@@ -87,6 +89,12 @@ python3 steward_cli.py apply --dataset retail_syn_data --table transactions
 
 # Recommend glossary terms using Vertex AI Semantic Similarity
 python3 steward_cli.py glossary-recommend --dataset retail_syn_data --table transactions
+
+# Scan a dataset for existing policy tags
+python3 steward_cli.py policy-scan --dataset retail_syn_data
+
+# Preview and apply policy tag propagation to a table
+python3 steward_cli.py policy-propagate --dataset retail_syn_data --table transactions --apply
 ```
 
 ### 3. Data Integration Scripts
@@ -104,6 +112,7 @@ python3 steward_cli.py glossary-recommend --dataset retail_syn_data --table tran
 | :--- | :--- | :--- |
 | **Glossary Plugin** | `agent/plugins/glossary_plugin.py` | Handles Business Glossary mapping using Vertex AI. |
 | **Lineage Plugin** | `agent/plugins/lineage_plugin.py` | Orchestrates description propagation via Lineage API. |
+| **Policy Tag Plugin** | `agent/plugins/policy_tag_plugin.py` | Recommends and applies Policy Tags based on lineage and SQL analysis. |
 | **Similarity Engine** | `agent/plugins/similarity_engine.py` | AI logic for scoring lexical and semantic matches. |
 | **Traverser** | `dataplex_integration/lineage_propagation.py` | Low-level Graph API logic for traversing dependencies. |
 | **Enricher** | `dataplex_integration/lineage_propagation.py` | Context-aware SQL transformation analyzer. |
@@ -116,4 +125,5 @@ python3 steward_cli.py glossary-recommend --dataset retail_syn_data --table tran
 2.  **Enrich**: Run **Dataset Insights** and Table Insight scans to populate initial metadata.
 3.  **Propagate**: Use the **Steward App** or **CLI** to bridge description gaps across the lineage chain.
 4.  **Tag**: Use the **Glossary Plugin** to map technical columns to the Business Glossary for Dataplex UI visibility.
-5.  **Verify**: Check the **BigQuery Console** (Descriptions) and **Dataplex Schema** (Business Terms).
+5.  **Secure**: Use the **Policy Tag Propagation** plugin to sync sensitive data tags and verify access summary (Readers/Masking Rules).
+6.  **Verify**: Check the **BigQuery Console** (Schema -> Policy Tags) and **Dataplex Schema** (Business Terms).

@@ -145,6 +145,26 @@ def create_view(source_table, view_name):
     job.result()
     print(f"Created view {view_name} over {source_table}")
 
+def attach_policy_tags(table_id, column_tags: Dict[str, str]):
+    """Attaches policy tags to columns in a BigQuery table."""
+    try:
+        table = client.get_table(table_id)
+        schema = list(table.schema)
+        new_schema = []
+        for field in schema:
+            if field.name in column_tags:
+                field_dict = field.to_api_repr()
+                field_dict['policyTags'] = {'names': [column_tags[field.name]]}
+                new_schema.append(bigquery.SchemaField.from_api_repr(field_dict))
+            else:
+                new_schema.append(field)
+        
+        table.schema = new_schema
+        client.update_table(table, ["schema"])
+        print(f"Attached policy tags to {table_id}: {list(column_tags.keys())}")
+    except Exception as e:
+        print(f"Warning: Failed to attach policy tags to {table_id}. Ensure tags exist. Error: {e}")
+
 if __name__ == "__main__":
     if not PROJECT_ID:
         print("Please set GOOGLE_CLOUD_PROJECT environment variable.")
@@ -190,4 +210,19 @@ if __name__ == "__main__":
     create_view("transactions", "transactions_v")
     create_view("products", "products_v")
     
+    # --- ADDED: Policy Tag Testing Support ---
+    # NOTE: Replace these with actual policy tag resource names in your environment
+    POLICY_TAG_EMAIL = os.environ.get("POLICY_TAG_EMAIL", "projects/YOUR_PROJECT/locations/YOUR_LOCATION/taxonomies/YOUR_TAXONOMY/policyTags/YOUR_EMAIL_TAG")
+    POLICY_TAG_CARD = os.environ.get("POLICY_TAG_CARD", "projects/YOUR_PROJECT/locations/YOUR_LOCATION/taxonomies/YOUR_TAXONOMY/policyTags/YOUR_CARD_TAG")
+    
+    if "YOUR_PROJECT" not in POLICY_TAG_EMAIL:
+        print("Attaching policy tags for testing...")
+        raw_cust_id = f"{PROJECT_ID}.{DATASET_ID}.raw_customers"
+        attach_policy_tags(raw_cust_id, {
+            "email": POLICY_TAG_EMAIL,
+            "card_number": POLICY_TAG_CARD
+        })
+    else:
+        print("\n[SKIP] Policy tag attachment skipped. Please set POLICY_TAG_EMAIL and POLICY_TAG_CARD env vars to test propagation.")
+
     print("Done.")
