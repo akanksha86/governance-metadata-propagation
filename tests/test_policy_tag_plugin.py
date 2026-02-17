@@ -20,6 +20,7 @@ class TestPolicyTagPlugin(unittest.TestCase):
         self.plugin._lineage_traverser = MagicMock()
         self.plugin._sql_fetcher = MagicMock()
         self.plugin._pt_client = MagicMock()
+        self.plugin._dp_client = MagicMock()
 
     def test_scan_for_policy_tags(self):
         # Mock BigQuery list_tables and get_table
@@ -79,6 +80,9 @@ class TestPolicyTagPlugin(unittest.TestCase):
         mock_binding.members = ["user:src-reader@example.com"]
         mock_iam_policy.bindings = [mock_binding]
         self.plugin._pt_client.get_iam_policy.return_value = mock_iam_policy
+        
+        # Mock Data Policy call
+        self.plugin._dp_client.list_data_policies.return_value = []
 
         with patch('policy_tag_plugin.TransformationEnricher.extract_column_logic', return_value="col1"):
             df = self.plugin.preview_policy_tag_propagation("test_dataset", "test_table")
@@ -86,6 +90,7 @@ class TestPolicyTagPlugin(unittest.TestCase):
         self.assertFalse(df.empty)
         self.assertEqual(df.iloc[0]["Recommendation"], "Propagate")
         self.assertEqual(df.iloc[0]["Target Column"], "col1")
+        self.assertEqual(df.iloc[0]["Access Summary"], "1 Readers, 0 Masking Policies")
 
     def test_preview_policy_tag_propagation_transformed(self):
         # Mock target table schema
@@ -118,16 +123,15 @@ class TestPolicyTagPlugin(unittest.TestCase):
         # Mock SQL logic (transformation)
         self.plugin._sql_fetcher.get_transformation_sql.return_value = "SELECT UPPER(src_col) as col1 FROM source"
         
-        # Mock IAM call
-        mock_iam_policy = MagicMock()
-        mock_iam_policy.bindings = []
-        self.plugin._pt_client.get_iam_policy.return_value = mock_iam_policy
+        # Mock Data Policy call
+        self.plugin._dp_client.list_data_policies.return_value = []
 
         with patch('policy_tag_plugin.TransformationEnricher.extract_column_logic', return_value="UPPER(src_col)"):
             df = self.plugin.preview_policy_tag_propagation("test_dataset", "test_table")
         
         self.assertFalse(df.empty)
         self.assertEqual(df.iloc[0]["Recommendation"], "Review Required (Transformed)")
+        self.assertEqual(df.iloc[0]["Access Summary"], "0 Readers, 0 Masking Policies")
 
     def test_apply_policy_tags(self):
         # Mock table with schema
@@ -221,6 +225,29 @@ class TestPolicyTagPlugin(unittest.TestCase):
         
         # Should be empty because it matched
         self.assertTrue(df.empty)
+
+    def test_get_policy_tag_reader_count(self):
+        mock_policy = MagicMock()
+        mock_binding = MagicMock()
+        mock_binding.role = "roles/datacatalog.categoryFineGrainedReader"
+        mock_binding.members = ["user:test@example.com", "group:test@example.com"]
+        mock_policy.bindings = [mock_binding]
+        self.plugin._pt_client.get_iam_policy.return_value = mock_policy
+        
+        count = self.plugin.get_policy_tag_reader_count("tag1")
+        self.assertEqual(count, 2)
+
+    def test_get_policy_tag_data_policy_count(self):
+        mock_policy_tag = "projects/p/locations/l/taxonomies/t/policyTags/pt"
+        mock_dp1 = MagicMock()
+        mock_dp1.policy_tag = mock_policy_tag
+        mock_dp2 = MagicMock()
+        mock_dp2.policy_tag = "other_tag"
+        
+        self.plugin._dp_client.list_data_policies.return_value = [mock_dp1, mock_dp2]
+        
+        count = self.plugin.get_policy_tag_data_policy_count(mock_policy_tag)
+        self.assertEqual(count, 1)
 
 if __name__ == '__main__':
     unittest.main()

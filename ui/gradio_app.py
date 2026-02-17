@@ -150,7 +150,7 @@ def get_policy_tag_recommendations(project_id, location, dataset_id, table_id, r
         df = plugin.preview_policy_tag_propagation(dataset_id, table_id)
         if df.empty:
             gr.Info(f"No policy tag recommendations found for {table_id}.")
-            return pd.DataFrame(columns=["Select", "Target Column", "Source Table", "Policy Tags", "Recommendation", "Logic", "Target Reader Propagation"])
+            return pd.DataFrame(columns=["Select", "Target Column", "Source Table", "Policy Tags", "Recommendation", "Logic", "Access Summary"])
         
         # Add selection column
         df.insert(0, "Select", [True] * len(df))
@@ -159,7 +159,7 @@ def get_policy_tag_recommendations(project_id, location, dataset_id, table_id, r
         logger.error(f"Policy tag recommendations failed: {e}")
         raise gr.Error(f"Operation failed: {str(e)}")
 
-def apply_policy_tag_recommendations(project_id, location, dataset_id, target_table, recommendations_df, propagate_access, additional_readers, request: gr.Request = None):
+def apply_policy_tag_recommendations(project_id, location, dataset_id, target_table, recommendations_df, additional_readers, request: gr.Request = None):
     token = get_token_from_session(request)
     set_oauth_token(token)
     try:
@@ -183,11 +183,8 @@ def apply_policy_tag_recommendations(project_id, location, dataset_id, target_ta
                 "policy_tag": row['Policy Tags'].split(", ")[0]
             }
             
-            # Aggregate readers
+            # Aggregate readers (only additional readers now, as source readers are handled as a summary)
             all_readers = []
-            if propagate_access and row["Target Reader Propagation"] != "No specific readers":
-                all_readers.extend([r.strip() for r in row["Target Reader Propagation"].split(",") if r.strip()])
-            
             if additional_readers:
                 all_readers.extend([r.strip() for r in additional_readers.split(",") if r.strip()])
             
@@ -689,8 +686,7 @@ with gr.Blocks(title="Dataplex Data Steward") as demo:
                 )
                 
                 with gr.Row():
-                    propagate_access_chk = gr.Checkbox(label="Propagate Source Access (Readers)", value=True)
-                    additional_readers_txt = gr.Textbox(label="Additional Readers (Comma separated)", placeholder="group:data-scientists@example.com, user:analyst@example.com")
+                    additional_readers_txt = gr.Textbox(label="Additional Readers to add (Comma separated)", placeholder="group:data-scientists@example.com, user:analyst@example.com")
                 
                 with gr.Row():
                     select_all_policy_btn = gr.Button("Select All", size="sm", elem_classes=["gr-button-secondary"])
@@ -714,7 +710,7 @@ with gr.Blocks(title="Dataplex Data Steward") as demo:
 
             apply_policy_btn.click(
                 apply_policy_tag_recommendations,
-                inputs=[config_project, config_location, global_dataset, policy_table, policy_recommendations_view, propagate_access_chk, additional_readers_txt],
+                inputs=[config_project, config_location, global_dataset, policy_table, policy_recommendations_view, additional_readers_txt],
                 outputs=policy_apply_result
             )
 

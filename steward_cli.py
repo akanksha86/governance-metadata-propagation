@@ -31,7 +31,9 @@ def main():
     apply_parser = subparsers.add_parser("apply", help="Preview and apply description propagation for a table")
     apply_parser.add_argument("--dataset", "--dataset_id", dest="dataset", required=True, help="BigQuery Dataset ID")
     apply_parser.add_argument("--table", "--table_id", dest="table", required=True, help="BigQuery Table ID")
+    
     # Glossary recommend command
+    glossary_parser = subparsers.add_parser("glossary-recommend", help="Recommend glossary terms for a table")
     glossary_parser.add_argument("--dataset", "--dataset_id", dest="dataset", required=True, help="BigQuery Dataset ID")
     glossary_parser.add_argument("--table", "--table_id", dest="table", required=True, help="BigQuery Table ID")
 
@@ -122,7 +124,7 @@ def main():
             print("No policy tag propagation recommendations found.")
         else:
             print("\nPolicy Tag Propagation Recommendations:")
-            cols_to_show = ["Target Column", "Source Table", "Policy Tags", "Recommendation", "Logic", "Target Reader Propagation"]
+            cols_to_show = ["Target Column", "Source Table", "Policy Tags", "Recommendation", "Logic", "Access Summary"]
             print(df[cols_to_show].to_string(index=False))
             
             if args.apply:
@@ -143,11 +145,8 @@ def main():
                         "policy_tag": row["Policy Tags"].split(", ")[0]
                     }
                     
-                    # Merge readers from propagation and additional readers
+                    # Merge additional readers
                     all_readers = []
-                    if args.propagate_access and row["Target Reader Propagation"] != "No specific readers":
-                        all_readers.extend([r.strip() for r in row["Target Reader Propagation"].split(",") if r.strip()])
-                    
                     if args.readers:
                         all_readers.extend([r.strip() for r in args.readers.split(",") if r.strip()])
                     
